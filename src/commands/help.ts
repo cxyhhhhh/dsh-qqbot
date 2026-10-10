@@ -1,5 +1,5 @@
 /**
- * /bot-help — 查看所有指令，按「通用能力 / QQBot 特有」分组展示
+ * /bot-help — 查看所有指令，按「通用能力 / QQ 机器人特有」分组展示
  *
  * 通用能力：对应底层 dsh agent 能力（new/compact/model/stop），无前缀
  * QQBot 特有：插件自身封装（bot-ping/bot-version/bot-status/bot-help），带 bot- 前缀
@@ -33,7 +33,7 @@ export function helpCommand(
         return out;
       };
 
-      const lines: string[] = ['### 🤖 QQBot 指令', ''];
+      const lines: string[] = ['### 🤖 QQ 机器人指令', ''];
 
       if (agentCmds.length > 0) {
         lines.push('**通用能力**', '', ...render(agentCmds), '');

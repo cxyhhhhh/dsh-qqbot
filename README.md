@@ -47,6 +47,8 @@ npx @deepseek-ai/dsh --profile qqbot
 
 首次启动时，插件检测到凭据未配置会自动进入扫码引导：终端输出二维码 → 手机 QQ 扫码绑定 → 凭据自动保存到 profile，后续启动无需再次扫码。
 
+DSH **桌面版 / Web** 下会自动打开应用内「QQ Bot 绑定」页（右侧边栏），端内渲染二维码并实时展示绑定状态，扫码成功后自动完成保存与插件重载；CLI 模式保持终端二维码引导。设置 `QQBOT_BIND_OPEN_BROWSER=1` 可在无端内页的环境额外拉起系统浏览器扫码页作为降级通道。
+
 <img src="./docs/assets/qrcode.png" alt="二维码扫码示意图" width="280" />
 
 > **提示**：建议升级至 `0.4.0` 以上版本扫码，支持点击链接在浏览器打开，避免部分终端二维码渲染错位的问题。
@@ -152,7 +154,16 @@ src/
 ├── index.ts                    # Cordis 插件入口（async apply）
 ├── config.ts                   # 配置 Schema
 ├── types.ts                    # 全局类型定义
-├── setup.ts                    # 凭据绑定（扫码）
+├── setup/                      # 凭据绑定（扫码）
+│   ├── index.ts                # 绑定编排（ensureCredentials）
+│   ├── binding-service.ts      # 扫码状态机（宿主内唯一事实源）
+│   ├── bind-routes.ts          # 端内绑定页路由（/qqbot/im-qqbot/bind）
+│   ├── presenters.ts           # 呈现策略（终端/浏览器降级）
+│   ├── qr-svg.ts               # 二维码 SVG 渲染（宿主侧）
+│   └── persist.ts              # 凭据写入 cordis.patch.yml
+├── client/                     # 浏览器半边（dsh.client Web Bundle）
+│   ├── index.ts                # 侧栏 Tab 注册 + 待绑定自动引导
+│   └── bind-page.ts             # 端内绑定页（二维码 + 状态轮询）
 ├── gateway/                    # 网关装配
 │   ├── bootstrap.ts            # 启动装配（监听 session/event 等）
 │   └── middleware-setup.ts     # 中间件链配置

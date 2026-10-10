@@ -1,14 +1,13 @@
 /**
- * QQ Bot 凭据初始化 — 扫码绑定
+ * QQ Bot 凭据持久化 — 写入 dsh profile 的 cordis.patch.yml
  *
- * 当 appId/appSecret 未配置时，通过 @tencent-connect/qqbot-connector
- * 唤起终端扫码流程获取凭据，并写入 dsh profile 配置。
+ * 用 js-yaml 解析现有文件后更新/追加 im-qqbot 条目，再 dump 写回，
+ * 保证输出始终是合法 YAML。文件不存在或为空时安全重建；
+ * 解析失败或结构异常时拒绝写入、保留原文件（避免覆盖用户其他配置）。
  */
 import { resolve } from 'node:path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import yaml from 'js-yaml';
-import { startQrConnect } from '@tencent-connect/qqbot-connector';
-import type { QrConnectCredentials } from '@tencent-connect/qqbot-connector';
 
 /** 凭据结果 */
 export interface SetupCredentials {
@@ -21,76 +20,6 @@ interface PatchEntry {
   id?: string;
   config?: Record<string, unknown>;
   [key: string]: unknown;
-}
-
-/** 终端可点击的 OSC 8 超链接（不支持 OSC 8 的终端会忽略控制序列，退化为纯 URL 文本） */
-function clickableLink(url: string): string {
-  return `\u001b]8;;${url}\u001b\\${url}\u001b]8;;\u001b\\`;
-}
-
-/**
- * 执行 QR 扫码绑定，获取 QQ Bot 凭据
- *
- * 在终端打印二维码等待用户扫码；同时输出扫码 URL，
- * 供二维码因系统字符问题渲染错位时点击/复制到浏览器打开扫码。
- */
-export async function runQrSetup(source = 'dsh-qqbot'): Promise<SetupCredentials | null> {
-  console.log('\n══════════════════════════════════════════════════════');
-  console.log('  QQ Bot 凭据未配置，启动扫码绑定');
-  console.log('══════════════════════════════════════════════════════\n');
-
-  try {
-    console.log('请使用手机 QQ 扫描下方二维码完成绑定...\n');
-
-    // 回调风格：onQrDisplayed 会在二维码打印后、轮询开始前回调扫码 URL，
-    // 让用户在二维码错位时也能通过链接打开扫码页（二维码过期刷新会再次触发）。
-    const credentials = await new Promise<QrConnectCredentials[]>((resolve, reject) => {
-      startQrConnect(
-        {
-          onSuccess: resolve,
-          onFailure: reject,
-          onQrDisplayed: (url) => {
-            console.log('二维码显示异常？点击下方链接，用浏览器打开即可完成扫码:');
-            console.log(`  ${clickableLink(url)}\n`);
-          },
-          onQrExpired: () => {
-            console.log('二维码已过期，正在刷新…\n');
-          },
-        },
-        { source },
-      );
-    });
-
-    if (!credentials || credentials.length === 0) {
-      console.error('[im-qqbot] 扫码未返回凭据');
-      return null;
-    }
-
-    const cred = credentials[0];
-    if (!cred) {
-      console.error('[im-qqbot] 扫码未返回有效凭据');
-      return null;
-    }
-    console.log(`\n✔ 绑定成功！AppID: ${cred.appId}\n`);
-
-    return {
-      appId: cred.appId,
-      appSecret: cred.appSecret,
-    };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-
-    if (msg.includes('Cannot find') || msg.includes('ERR_MODULE_NOT_FOUND')) {
-      console.error('[im-qqbot] @tencent-connect/qqbot-connector 未安装，无法扫码绑定');
-      console.error('[im-qqbot] 请通过环境变量配置:');
-      console.error('  export QQBOT_APPID="你的AppID"');
-      console.error('  export QQBOT_SECRET="你的AppSecret"');
-    } else {
-      console.error(`[im-qqbot] 扫码绑定失败: ${msg}`);
-    }
-
-    return null;
-  }
 }
 
 /**
@@ -145,7 +74,7 @@ export function persistCredentialsToProfile(
 
     // 3. dump 写回（保证合法 YAML）
     //    先确保 profile 目录存在（文件不存在时也能正常创建，而非误入 ENOENT）
-    const output = `# QQ Bot 凭据（扫码绑定自动生成）\n${yaml.dump(entries)}`;
+    const output = `# QQ 机器人凭据（扫码绑定自动生成）\n${yaml.dump(entries)}`;
     mkdirSync(dir, { recursive: true });
     writeFileSync(patchPath, output, 'utf8');
     log.info(`✔ 凭据已写入: ${patchPath}`);
@@ -159,10 +88,108 @@ export function persistCredentialsToProfile(
 }
 
 /**
+ * 从 dsh profile 的 cordis.patch.yml 中移除已保存的凭据（解绑）。
+ *
+ * 保留 im-qqbot 条目的其余 config（requireMention 等用户配置），
+ * 仅删除 appId/appSecret 字段；条目或字段不存在时幂等成功。
+ * 移除后写入触发 HMR 重载，插件回到未绑定态（绑定流程重新可用）。
+ */
+export function removeCredentialsFromProfile(
+  profileDir?: string,
+  logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
+): boolean {
+  const log = logger ?? console;
+  if (!profileDir) {
+    return false;
+  }
+
+  const patchPath = resolve(profileDir, 'cordis.patch.yml');
+
+  try {
+    if (!existsSync(patchPath)) return true; // 无 patch 文件 = 无凭据，幂等成功
+
+    const entries = parsePatchEntries(readFileSync(patchPath, 'utf8'));
+    const entry = entries.find((e) => e.id === 'im-qqbot');
+    if (entry === undefined || entry.config === undefined) return true;
+
+    if (entry.config.appId === undefined && entry.config.appSecret === undefined) return true;
+
+    delete entry.config.appId;
+    delete entry.config.appSecret;
+
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(patchPath, yaml.dump(entries), 'utf8');
+    log.info(`✔ 凭据已移除: ${patchPath}`);
+    log.info(`  插件将重新进入绑定流程`);
+    return true;
+  } catch (err) {
+    log.warn(`移除凭据失败: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+/**
+ * 将配置更新合并进 dsh profile 的 cordis.patch.yml（im-qqbot 条目）。
+ *
+ * 最小写入原则：只把「本次提交的顶层键」合并进条目 config——
+ * 不固化 bundle patch 的默认值（保持其版本演进的覆盖能力），
+ * 不触碰已保存的凭据字段（appId/appSecret 由绑定/更换/解绑流程管理）。
+ * 嵌套对象（如 access）按顶层键整体替换，避免部分合并出混合态。
+ * 写入触发 HMR 重载，新 fiber 以新配置启动。
+ */
+export function updateProfileConfig(
+  configPatch: Record<string, unknown>,
+  profileDir?: string,
+  logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
+): boolean {
+  const log = logger ?? console;
+  if (!profileDir) {
+    log.warn('未定位到 profile 目录，配置无法持久化');
+    return false;
+  }
+
+  const patchPath = resolve(profileDir, 'cordis.patch.yml');
+
+  try {
+    let entries: PatchEntry[] = [];
+    if (existsSync(patchPath)) {
+      entries = parsePatchEntries(readFileSync(patchPath, 'utf8'));
+    }
+
+    const entry = entries.find((e) => e.id === 'im-qqbot');
+    if (entry !== undefined) {
+      const existing = (entry.config ?? {}) as Record<string, unknown>;
+      // 只覆盖提交键；appId/appSecret 由绑定流程管理，防御性保留
+      const next: Record<string, unknown> = { ...existing };
+      for (const [key, value] of Object.entries(configPatch)) {
+        if (key === 'appId' || key === 'appSecret') continue;
+        next[key] = value;
+      }
+      entry.config = next;
+    } else {
+      const { appId: _a, appSecret: _s, ...rest } = configPatch;
+      entries.push({ id: 'im-qqbot', config: rest });
+    }
+
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(patchPath, yaml.dump(entries), 'utf8');
+    log.info(`✔ 配置已保存: ${patchPath}`);
+    log.info(`  插件将自动重载`);
+    return true;
+  } catch (err) {
+    log.warn(`保存配置失败: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+/**
  * 解析 cordis.patch.yml 为条目数组
  *
  * - 空内容 / 仅注释（yaml.load 返回 null/undefined）→ 空数组（允许安全重建）
  * - 空数组 `[]` / 条目列表 → 过滤出含 id 的对象
+ * - 非空但过滤后无任何可识别条目（如 bundle patch 的 `- insert: [...]`
+ *   结构）→ 抛错（由调用方保留原文件——此类文件不是 profile 用户 patch，
+ *   整体重写会破坏其原有内容）
  * - 非数组结构 / YAML 语法错误 → 抛错（由调用方保留原文件，避免覆盖用户其他配置）
  */
 function parsePatchEntries(content: string): PatchEntry[] {
@@ -174,10 +201,14 @@ function parsePatchEntries(content: string): PatchEntry[] {
   if (!Array.isArray(parsed)) {
     throw new Error('cordis.patch.yml 顶层必须是 YAML 数组');
   }
-  return parsed.filter(
+  const entries = parsed.filter(
     (e): e is PatchEntry =>
       typeof e === 'object' && e !== null && typeof (e as Record<string, unknown>).id === 'string',
   );
+  if (parsed.length > 0 && entries.length === 0) {
+    throw new Error('cordis.patch.yml 含条目但无带 id 的 patch 行（可能是 bundle patch，拒绝写入以保留原文件）');
+  }
+  return entries;
 }
 
 /** 开发模式引导：未定位到 profile 目录，引导用环境变量配置（console.log 确保可见） */

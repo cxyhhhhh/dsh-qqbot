@@ -2,14 +2,15 @@
  * dsh-im-qqbot — QQ Bot IM channel plugin for deepseek-harness
  *
  * Cordis 插件入口。将 QQ 消息平台作为 dsh 的前端协议驱动。
- * 网关组装（中间件编排 + 事件 + 出站 + 生命周期）见 src/gateway/。
+ * 网关组装（中间件编排 + 事件 + 出站 + 生命周期）见 src/gateway/；
+ * 凭据绑定编排（扫码状态机 + 端内绑定页路由）见 src/setup/。
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from './config.ts';
 import { bootstrapGateway } from './gateway/index.ts';
 import type { DshAgentRegistry } from './session/index.ts';
 import { getProfileDir, resolveEnv } from './shared/index.ts';
-import { runQrSetup, persistCredentialsToProfile } from './setup.ts';
+import { ensureCredentials, persistCredentialsToProfile, registerBoundCredentialRoutes } from './setup/index.ts';
 import type { Logger } from './types.ts';
 
 // ── Cordis 插件元数据 ──
@@ -24,37 +25,57 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
 
-  console.log('[im-qqbot] apply() called');
-
   let appId = resolveEnv(config.appId, 'QQBOT_APPID');
   let appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');
 
   // ── 凭据缺失时唤起扫码绑定 ──
   if (!appId || !appSecret) {
-    logger.info('凭据未配置，尝试扫码绑定...');
-    const credentials = await runQrSetup();
+    logger.info('凭据未配置，启动扫码绑定...');
 
-    if (!credentials) {
-      logger.error('无法获取 QQ Bot 凭据，插件未启动');
-      return;
-    }
+    // 关键：不 await 扫码结果。boot 会等 Loader 树稳定（loader.await()），
+    // 无限期等待用户扫码会阻塞 Host ready——Desktop 界面无法进入、
+    // Web 的 URL 延迟输出。绑定编排（路由/呈现/生命周期）在
+    // ensureCredentials 的同步阶段即完成，凭据就绪后由异步链接管。
+    void ensureCredentials(ctx, { logger, config: { ...config } })
+      .then((credentials): void => {
+        if (!credentials) {
+          // null 包括：扫码取消、手动提交（已另行持久化）、流程失败
+          logger.info('扫码绑定流程结束（未获取凭据或已手动配置）');
+          return;
+        }
 
-    // 写入环境变量（供热更新后的下次 apply 或本次直接启动读取）
-    process.env.QQBOT_APPID = credentials.appId;
-    process.env.QQBOT_SECRET = credentials.appSecret;
-    appId = credentials.appId;
-    appSecret = credentials.appSecret;
+        // 写入环境变量（供热更新后的下次 apply 或本次直接启动读取）
+        process.env.QQBOT_APPID = credentials.appId;
+        process.env.QQBOT_SECRET = credentials.appSecret;
 
-    // 持久化到 profile：成功则等待热更新重载，失败则用 env 凭据直接启动
-    const persisted = persistCredentialsToProfile(credentials, getProfileDir() ?? undefined, logger);
-    if (persisted) {
-      // 写入 cordis.patch.yml 会触发 dsh 热更新，自动重新加载本插件。
-      // 直接返回，避免与热更新产生竞态。
-      logger.info('配置已保存，等待热更新重新加载...');
-      return;
-    }
-    logger.warn('凭据未能持久化，本次进程将使用环境变量凭据启动（重启后需重新绑定）');
+        // 持久化到 profile：成功则等待热更新重载，失败则用凭据直接启动
+        const persisted = persistCredentialsToProfile(credentials, getProfileDir() ?? undefined, logger);
+        if (persisted) {
+          // 写入 cordis.patch.yml 会触发 dsh 热更新，自动重新加载本插件。
+          logger.info('配置已保存，等待热更新重新加载...');
+          return;
+        }
+        logger.warn('凭据未能持久化，本次进程将使用环境变量凭据启动（重启后需重新绑定）');
+        // 本 fiber 已激活（ctx 有效），直接以凭据启动网关
+        void bootstrapGateway(ctx, agents, {
+          ...config,
+          appId: credentials.appId,
+          appSecret: credentials.appSecret,
+        }, logger).catch((err: unknown) => {
+          logger.error(`网关启动失败: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      })
+      .catch((err: unknown) => {
+        // 全兜：unhandled rejection 会被宿主 fail-loud 判致命
+        logger.error(`扫码绑定流程异常: ${err instanceof Error ? err.message : String(err)}`);
+      });
+
+    // apply 立即完成，插件 fiber 进入 ACTIVE，Host ready 不再被阻塞
+    return;
   }
+
+  // 已绑定：注册常驻路由（状态回显 + 手动编辑/更换凭据 + 配置编辑）
+  registerBoundCredentialRoutes(ctx, logger, appId, { ...config });
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
 

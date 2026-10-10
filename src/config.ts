@@ -94,9 +94,17 @@ export interface ImQQBotConfig {
   sendFile: SendFileConfig;
 }
 
+/** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
+export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
+  c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式'),
+  c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单'),
+  groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式'),
+  groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单'),
+});
+
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
-  appId: Schema.string().default('').description('QQ Bot AppID'),
-  appSecret: Schema.string().default('').description('QQ Bot AppSecret'),
+  appId: Schema.string().default('').description('QQ 机器人 AppID'),
+  appSecret: Schema.string().default('').description('QQ 机器人 AppSecret'),
   provider: Schema.string().description('LLM provider name'),
   model: Schema.string().description('Model name'),
   preset: Schema.string().description('Agent preset id'),
@@ -111,12 +119,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
   askTimeoutMs: Schema.number().default(5 * 60 * 1000).description('待答问题超时(ms)，超时自动拒绝并提示'),
   historyLimit: Schema.number().default(10).description('群历史缓冲条数'),
-  access: Schema.object({
-    c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式'),
-    c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单'),
-    groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式'),
-    groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单'),
-  }).default({
+  access: AccessControlSchema.default({
     c2cMode: 'open',
     c2cAllow: [],
     groupMode: 'open',
