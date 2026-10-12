@@ -13,7 +13,7 @@ importers:
         version: 1.2.0
       '@tencent-connect/qqbot-nodejs':
         specifier: ^1.0.4
-        version: 1.0.4
+        version: 1.0.5
       js-yaml:
         specifier: ^4.1.0
         version: 4.3.1
@@ -282,9 +282,9 @@ packages:
     resolution: {integrity: sha512-FAOUCvgxP4M9UiYbHrtVgJ7BavSlh1CHJPjeEQuTAkP9MZ91lX4yATqv6I/lB9yp15nVq+G2DaGSSJwQTSoSsA==}
     engines: {node: '>=18.0.0'}
 
-  '@tencent-connect/qqbot-nodejs@1.0.4':
-    resolution: {integrity: sha512-gU5HySLplczZXMUjM7NtiUACY7YfX9YlI/R9PKzCLMgLmHvwsX9L2sitsrYPMentGUr9b8NLfSaSTsndF77NBA==}
-    engines: {node: '>=18'}
+  '@tencent-connect/qqbot-nodejs@1.0.5':
+    resolution: {integrity: sha512-OAPGoZTtG3soI79lGNQ4YqdAe9xy+lYatUfzZyBPmjaRjH0uLjFeImffMlGVSmhfaM/wJQSIA2g1uZv3eorTRg==}
+    engines: {node: '>=20'}
     peerDependencies:
       mpg123-decoder: ^1.0.3
       silk-wasm: ^3.7.1
@@ -1186,7 +1186,7 @@ snapshots:
     dependencies:
       qrcode-terminal: 0.12.0
 
-  '@tencent-connect/qqbot-nodejs@1.0.4':
+  '@tencent-connect/qqbot-nodejs@1.0.5':
     dependencies:
       ws: 8.21.3
     transitivePeerDependencies:
