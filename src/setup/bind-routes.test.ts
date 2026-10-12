@@ -6,7 +6,10 @@
  * 方法守卫、Origin 信任校验与 manual 请求体校验。
  */
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   BIND_CONFIG_PATH,
@@ -19,6 +22,13 @@ import {
   type WebRoute,
 } from './bind-routes.ts';
 import type { BindingService } from './binding-service.ts';
+
+/** 默认 unbind/persist 实现依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
+const profileDirState = vi.hoisted(() => ({ dir: undefined as string | undefined }));
+vi.mock('../shared/index.ts', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, getProfileDir: () => profileDirState.dir };
+});
 
 /** 假 req：EventEmitter + headers/method + 可读 body */
 function fakeReq(method: string, headers: Record<string, string | undefined> = {}, body?: string): IncomingMessage {
@@ -241,6 +251,83 @@ describe('bind-routes', () => {
     const res = fakeRes();
     await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('GET', { host: 'x' }), res);
     expect(res.statusCode).toBe(405);
+  });
+
+  it('POST unbind（默认实现）：删除 patch 凭据并清除进程 env（否则 HMR 后仍读到旧凭据，状态停留 bound）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'im-qqbot-unbind-'));
+    const patchPath = join(dir, 'cordis.patch.yml');
+    writeFileSync(patchPath, [
+      '- id: im-qqbot',
+      '  config:',
+      '    appId: "102120114"',
+      '    appSecret: "s3cr3t"',
+      '    requireMention: true',
+      '',
+    ].join('\n'), 'utf8');
+    profileDirState.dir = dir;
+    // 扫码绑定成功时会写入进程 env：模拟该残留
+    const savedAppId = process.env.QQBOT_APPID;
+    const savedSecret = process.env.QQBOT_SECRET;
+    process.env.QQBOT_APPID = '102120114';
+    process.env.QQBOT_SECRET = 's3cr3t';
+
+    try {
+      const { routes } = createHarness({ boundAppId: () => '102120114' });
+      const res = fakeRes();
+      await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }), res);
+
+      expect(res.statusCode).toBe(200);
+      expect(json(res)).toMatchObject({ ok: true });
+      // 进程 env 凭据被清除（HMR 重载后新 fiber 不再回退读到旧凭据）
+      expect(process.env.QQBOT_APPID).toBeUndefined();
+      expect(process.env.QQBOT_SECRET).toBeUndefined();
+      // patch 中的凭据被删除、其余配置保留
+      const content = readFileSync(patchPath, 'utf8');
+      expect(content).not.toContain('appId');
+      expect(content).not.toContain('appSecret');
+      expect(content).toContain('requireMention: true');
+    } finally {
+      profileDirState.dir = undefined;
+      if (savedAppId === undefined) delete process.env.QQBOT_APPID;
+      else process.env.QQBOT_APPID = savedAppId;
+      if (savedSecret === undefined) delete process.env.QQBOT_SECRET;
+      else process.env.QQBOT_SECRET = savedSecret;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('POST unbind（幂等重入）：patch 已无凭据时仍写回文件（触发宿主 HMR，bound fiber 才会卸载）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'im-qqbot-unbind-idem-'));
+    const patchPath = join(dir, 'cordis.patch.yml');
+    // 凭据已被上一次解绑删除，但 fiber 未重载（无 HMR）的场景
+    writeFileSync(patchPath, [
+      '- id: im-qqbot',
+      '  config:',
+      '    requireMention: true',
+      '',
+    ].join('\n'), 'utf8');
+    profileDirState.dir = dir;
+    const before = readFileSync(patchPath, 'utf8');
+
+    try {
+      const { routes } = createHarness({ boundAppId: () => '102120114' });
+      const res = fakeRes();
+      await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }), res);
+
+      expect(res.statusCode).toBe(200);
+      // 文件被重写（mtime 更新触发宿主 HMR 重载），内容仍为合法 YAML
+      expect(readFileSync(patchPath, 'utf8')).toEqual(before);
+    } finally {
+      profileDirState.dir = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  afterEach(() => {
+    if (profileDirState.dir !== undefined) {
+      rmSync(profileDirState.dir, { recursive: true, force: true });
+      profileDirState.dir = undefined;
+    }
   });
 
   it('GET config：回显生效配置且剔除 appSecret', async () => {

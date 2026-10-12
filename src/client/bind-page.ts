@@ -14,7 +14,7 @@
  * 运行时仅依赖 react（dsh 客户端平台种子表提供）；宿主通信走同源 fetch，
  * Desktop 下由壳的 IPC 桥自动附加 Host 认证转发。
  */
-import { createElement, useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { createElement, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
   BIND_MANUAL_PATH,
   BIND_REFRESH_PATH,
@@ -132,54 +132,96 @@ function usePanelStyles(): void {
  * 低频等待恢复而不是判定终态——否则保存成功提示会被
  * 「插件未启用」覆盖且无法自愈。
  *
- * @returns 轮询快照：state 为宿主相位（null = 加载中），gone 表示
- *          插件未启用（从未注册过路由）。
+ * bound 为稳定态：轮询大幅降频（30s）。因此解绑等本地动作后必须
+ * 调用 recheck() 立即重置节拍——否则视图最长停留 30s+ 才收敛到
+ * 新相位（如解绑后的 waiting 二维码）。
+ *
+ * @returns 轮询快照与 recheck：state 为宿主相位（null = 加载中），
+ *          gone 表示插件未启用（从未注册过路由），recheck 废弃当前
+ *          定时器并立即重新轮询（新轮询链取代旧链，不产生双计时器）。
  */
-function useBindState(): { state: BindStateWire | null; gone: boolean } {
+function useBindState(): { state: BindStateWire | null; gone: boolean; recheck: () => void } {
   const [state, setState] = useState<BindStateWire | null>(null);
   const [gone, setGone] = useState(false);
+  const recheckRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     let stopped = false;
     let sawRoute = false;
+    let generation = 0;
+    let running = false;
+    let restartAfterFlight = false;
+    // recheck 后的快速收敛窗口：解绑等动作改变的是服务端状态（经
+    // HMR 异步生效），动作后立即轮询拿到的可能仍是旧 fiber 的相位
+    // （如 bound→30s 降频），窗口期内强制快轮询直到相位真正变化
+    let urgentUntil = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const schedule = (ms: number): void => {
       timer = setTimeout(() => { void tick(); }, ms);
     };
 
+    const intervalFor = (phase: BindStateWire['phase']): number => {
+      const base = phase === 'saving' ? 500 : phase === 'bound' ? 30000 : ACTIVE_POLL_MS;
+      return Date.now() < urgentUntil ? Math.min(base, ACTIVE_POLL_MS) : base;
+    };
+
     const tick = async (): Promise<void> => {
-      if (stopped) return;
+      if (stopped || running) return;
+      running = true;
+      const myGeneration = generation;
+      const alive = (): boolean => myGeneration === generation && !stopped;
       try {
         const res = await fetch(BIND_STATE_PATH, { cache: 'no-store' });
         if (res.status === 404) {
           if (!stopped && !sawRoute) setGone(true);
-          // sawRoute：HMR 窗口期，保留当前视图低频等待路由恢复
-          if (!stopped && sawRoute) schedule(10000);
+          // sawRoute：HMR 窗口期，保留当前视图等待路由恢复
+          else if (alive()) schedule(Date.now() < urgentUntil ? 1000 : 3000);
           return;
         }
         if (!res.ok) {
-          schedule(RETRY_POLL_MS);
+          if (alive()) schedule(RETRY_POLL_MS);
           return;
         }
         sawRoute = true;
         const body = (await res.json()) as BindStateWire;
-        if (stopped) return;
+        if (!alive()) return;
         setState(body);
-        // bound 为稳定态：大幅降频；saving 即将切换；其余活跃轮询
-        schedule(body.phase === 'saving' ? 500 : body.phase === 'bound' ? 30000 : ACTIVE_POLL_MS);
+        schedule(intervalFor(body.phase));
         return;
       } catch {
         // 宿主启动窗口期不可达：退避重试
+      } finally {
+        running = false;
+        // 在飞期间被 recheck 取代：接力启动新轮询链（否则链会断）
+        if (restartAfterFlight && !stopped) {
+          restartAfterFlight = false;
+          void tick();
+        }
       }
-      schedule(RETRY_POLL_MS);
+      if (alive()) schedule(RETRY_POLL_MS);
+    };
+
+    // 立即重置节拍：废弃当前计时器，旧轮询链（在飞请求）作废，
+    // 新链立即发起，并进入快速收敛窗口
+    recheckRef.current = (): void => {
+      generation += 1;
+      urgentUntil = Date.now() + 15000;
+      if (timer !== undefined) clearTimeout(timer);
+      if (running) {
+        restartAfterFlight = true;
+        return;
+      }
+      void tick();
     };
 
     void tick();
     return () => { stopped = true; if (timer !== undefined) clearTimeout(timer); };
   }, []);
 
-  return { state, gone };
+  const recheck = useCallback((): void => { recheckRef.current(); }, []);
+
+  return { state, gone, recheck };
 }
 
 interface ManualResult { ok: boolean; message?: string; error?: string }
@@ -278,7 +320,7 @@ function QqBotIcon({ size = 28 }: { size?: number }): ReactNode {
 }
 
 /** 已绑定视图：回显 appId + 更换凭据 / 解绑入口 */
-function BoundView({ appId }: { appId: string }): ReactNode {
+function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): ReactNode {
   const [editing, setEditing] = useState(false);
   const [unbindResult, setUnbindResult] = useState<{ ok: boolean; message: string } | null>(null);
 
@@ -289,6 +331,9 @@ function BoundView({ appId }: { appId: string }): ReactNode {
         const body = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
         if (res.ok && body.ok === true) {
           setUnbindResult({ ok: true, message: body.message ?? '已解绑，插件将重载并重新进入绑定流程' });
+          // bound 态轮询已降频到 30s：立即重置节拍，让 waiting（二维码）
+          // 尽快出现而不是等下一个 30s 周期
+          recheck();
           return;
         }
         setUnbindResult({ ok: false, message: body.error ?? `解绑失败（HTTP ${res.status}）` });
@@ -296,15 +341,20 @@ function BoundView({ appId }: { appId: string }): ReactNode {
       .catch((err: unknown) => {
         setUnbindResult({ ok: false, message: err instanceof Error ? err.message : String(err) });
       });
-  }, []);
+  }, [recheck]);
 
   if (unbindResult !== null) {
+    // 非终态视图：解绑成功后正常由轮询收敛到 waiting；若 HMR 未
+    // 触发（状态停留 bound），用户仍有「刷新状态」出口而不是死胡同
     return createElement('div', { className: 'imqb-status' },
       createElement('div', { className: 'imqb-status-row' },
         createElement('div', { className: 'imqb-status-icon' }, unbindResult.ok ? '👋' : '⚠️'),
         createElement('div', { className: 'imqb-status-meta' },
           createElement('p', { className: 'imqb-status-title' }, unbindResult.message),
         ),
+        unbindResult.ok
+          ? createElement('button', { className: 'imqb-ghost', onClick: recheck }, '刷新状态')
+          : createElement('button', { className: 'imqb-ghost', onClick: () => { setUnbindResult(null); } }, '返回'),
       ),
     );
   }
@@ -365,7 +415,7 @@ function UnboundView({ state }: { state: Extract<BindStateWire, { phase: 'waitin
 /** 依据宿主相位渲染面板主体（各展示位共用） */
 export function BindPanelBody(): ReactNode {
   usePanelStyles();
-  const { state, gone } = useBindState();
+  const { state, gone, recheck } = useBindState();
   // 扫码成功的连接过渡场景需要保留最后一帧二维码：waiting 相位持续记录，
   // bound 后清空（避免下次解绑重绑时旧码闪现）
   const [lastQr, setLastQr] = useState<string | null>(null);
@@ -427,7 +477,7 @@ export function BindPanelBody(): ReactNode {
   }
 
   if (state.phase === 'bound') {
-    return createElement(BoundView, { appId: state.appId });
+    return createElement(BoundView, { appId: state.appId, recheck });
   }
 
   return createElement(UnboundView, { state });

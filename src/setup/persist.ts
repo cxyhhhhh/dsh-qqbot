@@ -110,13 +110,14 @@ export function removeCredentialsFromProfile(
 
     const entries = parsePatchEntries(readFileSync(patchPath, 'utf8'));
     const entry = entries.find((e) => e.id === 'im-qqbot');
-    if (entry === undefined || entry.config === undefined) return true;
+    if (entry?.config !== undefined) {
+      delete entry.config.appId;
+      delete entry.config.appSecret;
+    }
 
-    if (entry.config.appId === undefined && entry.config.appSecret === undefined) return true;
-
-    delete entry.config.appId;
-    delete entry.config.appSecret;
-
+    // 无条件写回：幂等场景（凭据字段已不存在）也更新 mtime——
+    // 宿主 HMR 靠文件变化触发重载，不写则 bound fiber 永不卸载，
+    // 解绑后状态会一直停留在 bound
     mkdirSync(profileDir, { recursive: true });
     writeFileSync(patchPath, yaml.dump(entries), 'utf8');
     log.info(`✔ 凭据已移除: ${patchPath}`);

@@ -6,7 +6,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
-import type { InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
 import { handleInbound, createOutboundHandler } from '../transport/index.ts';
 import { ReplyLimiter } from '../transport/reply-limiter.ts';
@@ -126,6 +126,16 @@ export async function bootstrapGateway(
 
   bot.on('error', (err: unknown) => {
     logger.error(`bot error: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
+  // 掉线可观测：willReconnect=false 表示不会再重连（随后 bot.start() 的 Promise 会失败）
+  bot.on('disconnected', (event: GatewayDisconnect) => {
+    const detail = `code=${event.code}${event.reason ? ` reason=${event.reason}` : ''}`;
+    if (event.willReconnect) {
+      logger.warn(`Bot disconnected (${detail}), reconnecting...`);
+    } else {
+      logger.error(`Bot disconnected permanently (${detail}), giving up`);
+    }
   });
 
   bot.on('ready', () => {

@@ -44,11 +44,10 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
           return;
         }
 
-        // 写入环境变量（供热更新后的下次 apply 或本次直接启动读取）
-        process.env.QQBOT_APPID = credentials.appId;
-        process.env.QQBOT_SECRET = credentials.appSecret;
-
-        // 持久化到 profile：成功则等待热更新重载，失败则用凭据直接启动
+        // 持久化到 profile：成功则等待热更新重载，失败则用凭据直接启动。
+        // 注意：不写入 process.env——resolveEnv 的 env 回退属于用户显式
+        // export 的配置语义，运行时写入会与解绑清理不对齐（解绑后 HMR
+        // 重载的新 fiber 仍从 env 读到旧凭据，状态停留 bound）
         const persisted = persistCredentialsToProfile(credentials, getProfileDir() ?? undefined, logger);
         if (persisted) {
           // 写入 cordis.patch.yml 会触发 dsh 热更新，自动重新加载本插件。
