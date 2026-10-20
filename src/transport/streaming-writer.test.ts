@@ -169,4 +169,35 @@ describe('StreamingWriter', () => {
 
     expect(session.complete).toHaveBeenCalledTimes(1);
   });
+
+  it('reset 清空累积文本，复用已打开会话，新内容全量重写', async () => {
+    const session = createSession();
+    const bot = createBot(() => session);
+    const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
+
+    writer.append('attempt-a');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.update).toHaveBeenCalledWith('attempt-a');
+
+    writer.reset();
+    writer.append('attempt-b');
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(writer.text).toBe('attempt-b');
+    expect(bot.openStream).toHaveBeenCalledTimes(1); // 流式会话复用，不新开消息
+    expect(session.update).toHaveBeenNthCalledWith(2, 'attempt-b'); // 全量替换
+    expect(writer.shouldFallback).toBe(false); // sentChunkCount 保留，不降级
+  });
+
+  it('finish 后 reset 不复活 writer', async () => {
+    const session = createSession();
+    const bot = createBot(() => session);
+    const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
+
+    writer.append('hello');
+    await writer.finish();
+    writer.reset();
+
+    expect(writer.text).toBe('hello'); // 终态后 reset 无效
+  });
 });

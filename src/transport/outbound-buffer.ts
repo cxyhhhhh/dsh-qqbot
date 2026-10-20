@@ -61,6 +61,12 @@ export class OutboundBuffer {
     return this.buffer;
   }
 
+  /** 重置累积文本（LLM 重试的新 attempt），流式会话保留由全量 update 重写 */
+  public reset(): void {
+    this.buffer = '';
+    this.writer?.reset();
+  }
+
   /** 发送所有累积文本：流式优先，降级静态 */
   public async flush(): Promise<void> {
     if (this.flushing || !this.buffer.trim()) return;

@@ -46,6 +46,18 @@ export class StreamingWriter {
     return this.fullText;
   }
 
+  /**
+   * 重置累积文本（LLM 重试的新 attempt）。
+   *
+   * 保留已打开的流式会话与 sentChunkCount：QQ 流式 update 是全量替换语义，
+   * 新 attempt 的增量会把同一条消息整体重写，用户不会看到两条消息；
+   * sentChunkCount 保留则防止重试后误判"从未发送"而降级静态造成重复。
+   */
+  public reset(): void {
+    if (this.finished) return;
+    this.fullText = '';
+  }
+
   /** 追加增量文本，节流（throttle）后 update 全量 */
   public append(delta: string): void {
     if (this.finished) return;

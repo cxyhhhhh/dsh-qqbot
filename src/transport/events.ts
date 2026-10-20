@@ -120,3 +120,41 @@ export function extractTurnError(reason: TurnEndReason): { code: string; message
     message: detail?.message ?? reason.message ?? 'unknown error',
   };
 }
+
+// ── agent/assistant-stream 实时流式帧（宿主 v2+） ──
+
+/**
+ * 归一化后的流式增量（`agent/assistant-stream` 瞬态帧，chunk 不进 session log）。
+ */
+export type StreamDelta =
+  | { kind: 'attempt-start'; attemptId: string }
+  | { kind: 'text-delta'; attemptId: string; text: string };
+
+/**
+ * 解析 `agent/assistant-stream` 的 payload（对齐 @deepseek-ai/dsh-agent 的
+ * AssistantStreamFrame 最小契约，避免硬依赖）。
+ *
+ * 只归一化两类帧：start（新 attempt）与 chunk 的 text-delta（文本增量）。
+ * reasoning-delta / tool-call-delta 不进用户消息；end 帧不处理——收尾由 durable
+ * `assistant/message` / `turn/end` 事件负责。未知形态返回 undefined。
+ */
+export function parseStreamFrame(raw: unknown): { agentId: string; delta: StreamDelta } | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const agentId = (raw as { agent?: { id?: unknown } }).agent?.id;
+  if (typeof agentId !== 'string' || !agentId) return undefined;
+
+  const frame = (raw as { frame?: unknown }).frame;
+  if (frame === null || typeof frame !== 'object') return undefined;
+  const { type, attemptId } = frame as { type?: unknown; attemptId?: unknown };
+  if (typeof attemptId !== 'string' || !attemptId) return undefined;
+
+  if (type === 'start') {
+    return { agentId, delta: { kind: 'attempt-start', attemptId } };
+  }
+  if (type === 'chunk') {
+    const chunk = (frame as { chunk?: { type?: unknown; text?: unknown } | null }).chunk;
+    if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string' || !chunk.text) return undefined;
+    return { agentId, delta: { kind: 'text-delta', attemptId, text: chunk.text } };
+  }
+  return undefined;
+}

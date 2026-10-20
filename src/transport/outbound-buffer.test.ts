@@ -92,4 +92,25 @@ describe('OutboundBuffer', () => {
 
     expect(session.complete).toHaveBeenCalledTimes(1);
   });
+
+  it('reset 清空累积文本并保留流式会话', async () => {
+    const session = createSession();
+    const bot = createBot(() => session);
+    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
+
+    buffer.append('old');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.update).toHaveBeenCalledWith('old');
+
+    buffer.reset();
+    expect(buffer.text).toBe('');
+
+    buffer.append('new');
+    await buffer.flush();
+
+    expect(bot.openStream).toHaveBeenCalledTimes(1); // 会话复用
+    expect(session.update).toHaveBeenNthCalledWith(2, 'new'); // 全量替换
+    expect(session.complete).toHaveBeenCalledTimes(1);
+    expect(bot.sendMarkdown).not.toHaveBeenCalled(); // 不降级静态
+  });
 });

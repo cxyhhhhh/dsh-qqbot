@@ -19,13 +19,25 @@ import {
   type ToolResultEvent,
   type TurnEndEvent,
   type RawSessionEvent,
+  type StreamDelta,
 } from './events.ts';
 
 export type { QQBotSender } from './outbound-buffer.ts';
 export type { ToolsRegistryLike } from './tool-presenter.ts';
+export { parseStreamFrame } from './events.ts';
 
 /** 出站处理器签名（注册到 ctx.on('session/event')） */
 export type OutboundHandler = (session: SessionLike, event: RawSessionEvent) => void;
+
+/** 出站事件入口集合：durable 事件 + 实时流式帧 */
+export interface OutboundHandlers {
+  /** durable session 事件入口（注册到 ctx.on('session/event')） */
+  routeSessionEvent(session: SessionLike, event: RawSessionEvent): void;
+  /**
+   * 实时流式帧入口（注册到 ctx.on('agent/assistant-stream', ..., { global: true })）。
+   */
+  routeStreamFrame(agentId: string, delta: StreamDelta): void;
+}
 
 /** dsh Session 简化类型 */
 export interface SessionLike {
@@ -47,6 +59,8 @@ const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
 class OutboundRouter {
   private readonly buffers = new Map<string, OutboundBuffer>();
   private readonly toolCalls = new Map<string, ToolCallRecord>();
+  /** 每会话当前流式 attemptId：LLM 重试会发布新 attempt，用于 reset 与迟到帧过滤 */
+  private readonly streamAttempts = new Map<string, string>();
   private readonly manager: SessionManager;
   private readonly bot: QQBotSender;
   private readonly config: ImQQBotConfig;
@@ -94,14 +108,49 @@ class OutboundRouter {
     }
   }
 
-  /** 流式文本增量：累积到会话 buffer */
+  /** durable assistant/chunk 事件的流式增量（历史格式兼容保留，当前宿主不再生产该事件） */
   private onChunk(sessionId: string, record: SessionRecord, event: ChunkEvent): void {
+    this.appendChunk(sessionId, record, event.text);
+  }
+
+  /**
+   * 实时流式帧入口（瞬态 agent/assistant-stream 事件）。
+   *
+   * attempt 语义：start 帧即新内容起点，无条件重置 buffer——清空旧 attempt 的
+   * 累积文本但保留流式会话（QQ 流式 update 是全量替换，用户看到同一条消息被
+   * 新内容重写）。不用 attemptId 对比判断"新 attempt"：agent replacement 后
+   * attempt 计数重启、attemptId 可能与旧 agent 重叠（官方按 frame revision 的
+   * gap 检测处理同一问题）。迟到帧（attemptId 不匹配）仍直接丢弃，防止旧
+   * attempt 的尾巴混进新内容。
+   */
+  public routeStreamFrame(agentId: string, delta: StreamDelta): void {
+    if (delta.kind === 'attempt-start') {
+      this.streamAttempts.set(agentId, delta.attemptId);
+      this.buffers.get(agentId)?.reset();
+      return;
+    }
+
+    // text-delta：首帧未见 start 时自愈记录，迟到帧丢弃
+    const current = this.streamAttempts.get(agentId);
+    if (current === undefined) {
+      this.streamAttempts.set(agentId, delta.attemptId);
+    } else if (current !== delta.attemptId) {
+      return;
+    }
+
+    const record = this.manager.findBySessionId(agentId);
+    if (record === undefined) return;
+    this.appendChunk(agentId, record, delta.text);
+  }
+
+  /** 获取或创建会话 buffer 并追加增量 */
+  private appendChunk(sessionId: string, record: SessionRecord, text: string): void {
     let buffer = this.buffers.get(sessionId);
     if (buffer === undefined) {
       buffer = new OutboundBuffer(record, this.bot, this.config.textChunkLimit, this.logger, this.shouldStream(record));
       this.buffers.set(sessionId, buffer);
     }
-    buffer.append(event.text);
+    buffer.append(text);
   }
 
   /** 是否启用流式：配置开启 + c2c + 有 msgId（群聊不支持流式） */
@@ -156,7 +205,7 @@ class OutboundRouter {
     void this.send(record, text, 'sendToolResult');
   }
 
-  /** 轮次结束：清理 buffer，异常结束时告知用户 */
+  /** 轮次结束：清理 buffer 与 attempt 跟踪状态，异常结束时告知用户 */
   private onTurnEnd(sessionId: string, record: SessionRecord, event: TurnEndEvent): void {
     const buffer = this.buffers.get(sessionId);
     if (buffer !== undefined) {
@@ -167,6 +216,7 @@ class OutboundRouter {
       }
       this.buffers.delete(sessionId);
     }
+    this.streamAttempts.delete(sessionId);
 
     const failure = extractTurnError(event.reason);
     if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {
@@ -192,7 +242,8 @@ class OutboundRouter {
 /**
  * 创建出站事件处理器
  *
- * 返回一个 handler 函数，应注册到 ctx.on('session/event', handler)。
+ * 返回 durable 事件与实时流式帧两个入口，分别注册到
+ * ctx.on('session/event') 与 ctx.on('agent/assistant-stream', ..., { global: true })。
  * toolsRegistry 用于工具结果的结构化展示。
  */
 export function createOutboundHandler(
@@ -201,7 +252,10 @@ export function createOutboundHandler(
   config: ImQQBotConfig,
   logger: Logger,
   toolsRegistry?: ToolsRegistryLike,
-): OutboundHandler {
+): OutboundHandlers {
   const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry);
-  return (session, event) => router.route(session, event);
+  return {
+    routeSessionEvent: (session, event) => router.route(session, event),
+    routeStreamFrame: (agentId, delta) => router.routeStreamFrame(agentId, delta),
+  };
 }
