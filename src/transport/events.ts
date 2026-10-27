@@ -56,13 +56,30 @@ export interface TurnEndEvent {
   reason: TurnEndReason;
 }
 
+/** present 工具声明的一个交付文件 */
+export interface PresentedFileRef {
+  /** 绝对路径，或相对 Session 工作目录的路径（仅历史声明） */
+  path: string;
+  /** 模型提供的可选说明 */
+  description?: string;
+}
+
+/** deliverables/presented 事件（present 声明的交付文件，含嵌套调用） */
+export interface DeliverablesPresentedEvent {
+  type: 'deliverables/presented';
+  turn: number;
+  callId: string;
+  files: PresentedFileRef[];
+}
+
 /** 出站事件联合类型 */
 export type OutboundEvent =
   | ChunkEvent
   | MessageEvent
   | ToolCallEvent
   | ToolResultEvent
-  | TurnEndEvent;
+  | TurnEndEvent
+  | DeliverablesPresentedEvent;
 
 /**
  * 解析原始事件为强类型
@@ -99,6 +116,21 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     case 'turn/end': {
       const reason = (raw.data as { reason?: TurnEndReason }).reason ?? {};
       return { type: 'turn/end', reason };
+    }
+
+    case 'deliverables/presented': {
+      const data = raw.data as { turn?: unknown; callId?: unknown; files?: unknown };
+      if (typeof data.turn !== 'number' || typeof data.callId !== 'string' || !data.callId) return undefined;
+      if (!Array.isArray(data.files) || data.files.length === 0) return undefined;
+      const files: PresentedFileRef[] = [];
+      for (const file of data.files) {
+        if (file === null || typeof file !== 'object' || Array.isArray(file)) return undefined;
+        const { path, description } = file as { path?: unknown; description?: unknown };
+        if (typeof path !== 'string' || !path) return undefined;
+        if (description !== undefined && typeof description !== 'string') return undefined;
+        files.push(description === undefined ? { path } : { path, description });
+      }
+      return { type: 'deliverables/presented', turn: data.turn, callId: data.callId, files };
     }
 
     default:

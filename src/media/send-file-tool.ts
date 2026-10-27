@@ -7,14 +7,13 @@
  *   - 路径白名单：默认只允许访问 media 目录 + agent cwd，可开关 + 扩展白名单。
  */
 import { existsSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
-import { basename, isAbsolute, relative, resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
-import type { ImQQBotConfig, SendFileConfig } from '../config.ts';
+import type { ImQQBotConfig } from '../config.ts';
 import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
-import { MEDIA_ROOT } from './media-cleaner.ts';
+import { isPathAllowed, sendMediaFile, type MediaSenderLike } from './send-media.ts';
 
 /** 工具名（qqbot 前缀避免与其他通道的同名工具冲突） */
 export const SEND_FILE_TOOL_NAME = 'qqbot_send_file';
@@ -25,18 +24,8 @@ const DESCRIPTION =
   + 'Use this when the user asks you to deliver a generated file (chart, report, exported data, '
   + 'screenshot, etc.) or to send an existing media/file back to them.';
 
-/** 发送器最小接口（QQBot 实例满足） */
-interface MediaSendResult {
-  upload: { file_uuid: string };
-  message?: { id?: string };
-}
-
-export interface MediaSenderLike {
-  sendImage(target: ReplyTarget, source: { localPath?: string }): Promise<MediaSendResult>;
-  sendVideo(target: ReplyTarget, source: { localPath?: string }): Promise<MediaSendResult>;
-  sendVoice(target: ReplyTarget, source: { localPath?: string }): Promise<MediaSendResult>;
-  sendFile(target: ReplyTarget, source: { localPath?: string }, opts?: { fileName?: string }): Promise<MediaSendResult>;
-}
+/** 发送器与分类发送的共享实现见 send-media.ts（扩展名分发 + 白名单为单一事实源） */
+export type { MediaSenderLike, MediaSendResult } from './send-media.ts';
 
 /** tools 服务最小接口 */
 interface ToolsRegistryLike {
@@ -49,10 +38,6 @@ interface SendFileArgs {
   target?: string;
 }
 
-const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
-const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
-const VOICE_EXTS = new Set(['.mp3', '.wav', '.ogg', '.aac', '.silk', '.amr']);
-
 /** 解析显式 target（"c2c:openid" / "group:openid"），非法返回 undefined */
 function parseTarget(input: string): ReplyTarget | undefined {
   const idx = input.indexOf(':');
@@ -61,19 +46,6 @@ function parseTarget(input: string): ReplyTarget | undefined {
   const targetId = input.slice(idx + 1);
   if (!targetId || (scope !== 'c2c' && scope !== 'group')) return undefined;
   return { scope, targetId };
-}
-
-/** 判断 filePath 是否位于 root 目录内（含 root 本身） */
-function isWithinRoot(filePath: string, root: string): boolean {
-  const rel = relative(resolve(root), filePath);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-}
-
-/** 路径白名单校验：restrictPaths 关闭时放行任意路径，否则限定 media + cwd + extraRoots */
-function isPathAllowed(filePath: string, config: SendFileConfig, cwd: string): boolean {
-  if (!config.restrictPaths) return true;
-  const roots = [MEDIA_ROOT, cwd, ...config.extraRoots];
-  return roots.some((root) => isWithinRoot(filePath, root));
 }
 
 /** 注册 qqbot_send_file 工具（tools 服务缺失时优雅降级，不阻断插件启动） */
@@ -156,35 +128,25 @@ export function registerSendFileTool(
       if (!existsSync(absPath)) {
         throw new Error(`qqbot_send_file: 文件不存在: ${absPath}`);
       }
-      const info = await stat(absPath);
-      if (!info.isFile()) {
-        throw new Error(`qqbot_send_file: 路径不是普通文件: ${absPath}`);
-      }
 
-      // 3. 按扩展名分类发送
+      // 3. 按扩展名分类发送（与交付物投递共用 send-media 的分发实现）
       const fileName = basename(absPath);
-      const ext = absPath.slice(absPath.lastIndexOf('.')).toLowerCase();
-      const source = { localPath: absPath };
-
-      let result: MediaSendResult;
-      if (IMAGE_EXTS.has(ext)) {
-        result = await bot.sendImage(replyTarget, source);
-      } else if (VIDEO_EXTS.has(ext)) {
-        result = await bot.sendVideo(replyTarget, source);
-      } else if (VOICE_EXTS.has(ext)) {
-        result = await bot.sendVoice(replyTarget, source);
-      } else {
-        result = await bot.sendFile(replyTarget, source, { fileName });
+      const result = await sendMediaFile(bot, replyTarget, absPath);
+      if (result.outcome === 'missing') {
+        throw new Error(`qqbot_send_file: 文件不存在或不可读: ${absPath}`);
+      }
+      if (result.outcome === 'failed') {
+        throw new Error(`qqbot_send_file: 发送失败: ${result.error}`);
       }
 
-      logger.info(`im-qqbot: qqbot_send_file 发送 ${fileName} (${info.size} bytes) → ${replyTarget.scope}:${replyTarget.targetId}`);
+      logger.info(`im-qqbot: qqbot_send_file 发送 ${fileName} (${result.size} bytes) → ${replyTarget.scope}:${replyTarget.targetId}`);
 
       return {
         fileName,
-        fileSize: info.size,
+        fileSize: result.size,
         target: `${replyTarget.scope}:${replyTarget.targetId}`,
-        fileUuid: result.upload.file_uuid,
-        ...(result.message?.id !== undefined ? { messageId: result.message.id } : {}),
+        fileUuid: result.fileUuid ?? '',
+        ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
       };
     },
   };

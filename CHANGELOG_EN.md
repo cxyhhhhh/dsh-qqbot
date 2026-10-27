@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **Streaming replies**: replies stream to QQ in segments while the model generates, and an automatic LLM retry rewrites the same streamed message instead of appending a duplicate. Streaming had never actually worked; it does now.
+- **Delivered files reach the chat**: files the model declares as deliverables are automatically sent to the current QQ conversation right after the turn's reply, with a text notice when a file cannot be sent; can be disabled or capped in configuration.
 
 ### Fixed
 

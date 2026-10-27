@@ -25,6 +25,7 @@ import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
+import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -99,7 +100,20 @@ export async function bootstrapGateway(
     }),
   };
 
-  const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
+  // ── 附件发送适配器（qqbot_send_file 工具与交付物投递共用） ──
+  // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
+  // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
+  const mediaSender: MediaSenderLike = {
+    sendImage: (target, source) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source),
+    sendVideo: (target, source) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source),
+    sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
+    sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
+  };
+
+  // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
+  const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
+
+  const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry, deliverablesDeliverer);
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void })
     .on('session/event', outbound.routeSessionEvent as (...args: unknown[]) => void);
 
@@ -168,15 +182,7 @@ export async function bootstrapGateway(
   ensureVisionInputModal(config.vision, logger);
   registerDescribeImageTool(ctx, config.vision, logger);
 
-  // ── 附件发送工具注册（qqbot_send_file） ──
-  // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
-  // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
-  const mediaSender: MediaSenderLike = {
-    sendImage: (target, source) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source),
-    sendVideo: (target, source) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source),
-    sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
-    sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
-  };
+  // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
   registerSendFileTool(ctx, mediaSender, manager, config, logger);
 
   // ── 生命周期 ──

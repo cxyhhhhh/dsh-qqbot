@@ -40,11 +40,16 @@ export interface VisionConfig {
   timeoutMs: number;
 }
 
+/** 附件发送配置（qqbot_send_file 工具与 present 交付物投递共用） */
 export interface SendFileConfig {
   /** 是否启用路径白名单（默认 true，仅允许 media + cwd + extraRoots；关闭则任意路径） */
   restrictPaths: boolean;
   /** 额外允许访问的根目录（media 和 agent cwd 始终默认允许） */
   extraRoots: string[];
+  /** 是否把 present 声明的交付文件在轮末发送到当前会话 */
+  sendPresentedFiles: boolean;
+  /** 单轮最多投递的交付文件数 */
+  maxFiles: number;
 }
 
 export interface ImQQBotConfig {
@@ -90,7 +95,7 @@ export interface ImQQBotConfig {
   media: MediaConfig;
   /** 视觉理解（qqbot_describe_image 工具，走 dsh llm + attachments） */
   vision: VisionConfig;
-  /** 附件发送（qqbot_send_file 工具） */
+  /** 附件发送（qqbot_send_file 工具与交付物投递共用） */
   sendFile: SendFileConfig;
 }
 
@@ -156,8 +161,12 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   sendFile: Schema.object({
     restrictPaths: Schema.boolean().default(true).description('是否启用路径白名单（默认 true，仅允许 media + cwd + extraRoots）'),
     extraRoots: Schema.array(Schema.string()).default([]).description('额外允许访问的根目录'),
+    sendPresentedFiles: Schema.boolean().default(true).description('是否将 present 声明的交付文件发送到当前会话'),
+    maxFiles: Schema.number().default(4).description('单轮最多投递的交付文件数'),
   }).default({
     restrictPaths: true,
     extraRoots: [],
-  }).description('附件发送工具配置'),
+    sendPresentedFiles: true,
+    maxFiles: 4,
+  }).description('附件发送配置'),
 });
