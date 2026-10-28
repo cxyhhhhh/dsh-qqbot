@@ -1,13 +1,21 @@
 /**
- * QQ Bot 凭据持久化 — 写入 dsh profile 的 cordis.patch.yml
+ * QQ Bot 凭据与配置持久化 — 写入 dsh profile 的 cordis.patch.yml
  *
- * 用 js-yaml 解析现有文件后更新/追加 im-qqbot 条目，再 dump 写回，
- * 保证输出始终是合法 YAML。文件不存在或为空时安全重建；
- * 解析失败或结构异常时拒绝写入、保留原文件（避免覆盖用户其他配置）。
+ * 该文件是宿主的组合覆盖层，存在多个写者（宿主设置流程、本插件、用户手工编辑）。
+ * 写入遵循四条约束：
+ *
+ * 1. 文档保真：用 eemeli/yaml 的 Document API 原地编辑，注释、锚点、
+ *    `!!js` 表达式、insert 行等所有本插件不拥有的内容一律原样保留；
+ * 2. fail-closed：非法 YAML / 顶层非数组 / config 非映射 / 配置被锚点
+ *    共享时拒绝写入、保留原文件；
+ * 3. 原子写：同目录临时文件 + rename，崩溃不会留下截断的半份文件；
+ * 4. 乐观校验：写入前重读比对（外部并发改动则重试合并），写入后读回
+ *    验证本插件条目正确、其他条目集合不变，失败则回滚原内容。
  */
 import { resolve } from 'node:path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import yaml from 'js-yaml';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { parseDocument, isMap, isSeq, isScalar, YAMLMap, type Document, type YAMLSeq } from 'yaml';
+import type { Logger } from '../types.ts';
 
 /** 凭据结果 */
 export interface SetupCredentials {
@@ -15,19 +23,187 @@ export interface SetupCredentials {
   appSecret: string;
 }
 
-/** cordis.patch.yml 中的 patch 条目 */
-interface PatchEntry {
-  id?: string;
-  config?: Record<string, unknown>;
-  [key: string]: unknown;
+/** 宿主 Include 方言：保留 !!js 等自定义标签为字面量字符串 */
+const PARSE_OPTIONS: { customTags: Array<{ tag: string; resolve: (value: string) => string }> } = {
+  customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+};
+
+/** 剖析错误：fail-closed 语义（调用方拒绝写入、保留原文件） */
+class PatchFormatError extends Error {}
+
+/** 插件在 patch 文件中的条目 id */
+const ENTRY_ID = 'im-qqbot';
+
+/** 乐观并发重试次数（外部进程在读写窗口内改动的兜底；同进程写者被同步执行天然串行） */
+const WRITE_ATTEMPTS = 3;
+
+type PersistLogger = Pick<Logger, 'info' | 'warn'>;
+
+/** 编辑上下文：attached 表示 im-qqbot 条目已在文档中（false = 本次新追加） */
+interface EditContext {
+  config: YAMLMap;
+  attached: boolean;
+  /** 把（编辑后的）config 作为新的 im-qqbot 条目追加进文档 */
+  appendEntry(): void;
+}
+
+/** 编辑结果：false = 文档无需变更（幂等，不写不触 mtime）；true = 变更或强制写回 */
+type EditResult = boolean;
+
+/**
+ * 对 cordis.patch.yml 做一次「读 → 原地编辑 → 原子写 → 验证」的事务。
+ *
+ * 同步执行（无 await）：JS 单线程保证读-改-写不会被同进程的其他写者
+ * （宿主设置流程）交错；重试与读回校验兜底外部进程的并发改动。
+ *
+ * @param dir - profile 目录
+ * @param edit - 编辑函数（必须可重入：乐观重试会在重新解析的文档上再次执行）
+ * @param options.force - 无条件写回（解绑场景靠 mtime 触发宿主 HMR）
+ * @param verify - 写入后读回校验：返回 false 则回滚
+ * @param log - 日志
+ */
+function editProfilePatch(
+  dir: string,
+  edit: (ctx: EditContext) => EditResult,
+  options: { force?: boolean },
+  verify: (config: YAMLMap | undefined) => boolean,
+  log: PersistLogger,
+): boolean {
+  const patchPath = resolve(dir, 'cordis.patch.yml');
+  mkdirSync(dir, { recursive: true });
+
+  for (let attempt = 1; ; attempt++) {
+    // 1. 读取 + 解析（非法内容抛 PatchFormatError → fail-closed）
+    const before = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : '';
+    const doc = parseProfilePatch(before);
+    const otherIdsBefore = collectEntryIds(doc);
+
+    // 2. 原地编辑
+    const changed = applyEdit(doc, edit);
+    if (!changed && !options.force) return true;
+
+    const next = doc.toString({ lineWidth: 0 });
+
+    // 3. 乐观校验：解析期间文件被外部改动 → 重读重试
+    const current = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : '';
+    if (current !== before) {
+      if (attempt < WRITE_ATTEMPTS) continue;
+      log.warn('cordis.patch.yml 在写入窗口内被外部修改，放弃本次写入（原文件保留）');
+      return false;
+    }
+
+    // 4. 原子写：同目录临时文件 + rename（同分区保证原子）
+    const tmpPath = `${patchPath}.imqqbot.tmp`;
+    try {
+      writeFileSync(tmpPath, next, 'utf8');
+      renameSync(tmpPath, patchPath);
+    } catch (err) {
+      try { unlinkSync(tmpPath); } catch { /* 临时文件可能不存在 */ }
+      throw err;
+    }
+
+    // 5. 读回验证：其他条目集合不变 + 本插件条目符合预期；失败回滚原内容
+    try {
+      const writtenDoc = parseProfilePatch(readFileSync(patchPath, 'utf8'));
+      if (collectEntryIds(writtenDoc).join('\n') !== otherIdsBefore.join('\n')) {
+        throw new Error('写入后其他条目集合发生变化');
+      }
+      if (!verify(findEntryConfig(writtenDoc))) {
+        throw new Error('写入后 im-qqbot 条目校验失败');
+      }
+    } catch (err) {
+      log.warn(`写入验证失败，回滚 cordis.patch.yml: ${err instanceof Error ? err.message : String(err)}`);
+      const rollback = `${patchPath}.imqqbot.rollback`;
+      writeFileSync(rollback, before, 'utf8');
+      renameSync(rollback, patchPath);
+      return false;
+    }
+    return true;
+  }
+}
+
+/** 解析并校验顶层结构：空/仅注释 → 空列表文档；非数组 → fail-closed */
+function parseProfilePatch(content: string): Document.Parsed {
+  const doc = parseDocument(content, PARSE_OPTIONS);
+  if (doc.contents === null) {
+    // 空/仅注释：等价空列表，允许安全重建
+    return parseDocument('[]', PARSE_OPTIONS);
+  }
+  if (!isSeq(doc.contents)) {
+    throw new PatchFormatError('顶层必须是 YAML 数组（条目 / patch 行列表）');
+  }
+  return doc;
+}
+
+/** 收集顶层行的标识（id 条目 / 非 id 行），用于写前后不变性校验；排除本插件条目（编辑对象） */
+function collectEntryIds(doc: Document.Parsed): string[] {
+  const seq = doc.contents;
+  if (!isSeq(seq)) return [];
+  const ids: string[] = [];
+  for (const item of seq.items) {
+    if (isMap(item)) {
+      const idNode = item.get('id', true);
+      if (isScalar(idNode)) {
+        if (String(idNode.value) === ENTRY_ID) continue;
+        ids.push(`id:${String(idNode.value)}`);
+        continue;
+      }
+    }
+    ids.push(`row:${ids.length}`);
+  }
+  return ids;
+}
+
+/** 定位 im-qqbot 条目的 config（不存在返回 undefined）；config 非映射/被锚点共享 → fail-closed */
+function findEntryConfig(doc: Document.Parsed): YAMLMap | undefined {
+  const seq = doc.contents;
+  if (!isSeq(seq)) return undefined;
+  for (const item of seq.items) {
+    if (!isMap(item)) continue;
+    const idNode = item.get('id', true);
+    if (!isScalar(idNode) || String(idNode.value) !== ENTRY_ID) continue;
+    const configNode = item.get('config', true);
+    if (configNode === undefined) return undefined;
+    if (!isMap(configNode)) {
+      throw new PatchFormatError('im-qqbot 条目的 config 不是映射');
+    }
+    if (configNode.anchor) {
+      throw new PatchFormatError('im-qqbot 的 config 被锚点共享（其他条目引用同一份），原地修改会影响引用方');
+    }
+    return configNode;
+  }
+  return undefined;
+}
+
+/** 执行编辑并检测文档变更；fail-closed 错误向上抛给调用方拒绝写入 */
+function applyEdit(doc: Document.Parsed, edit: (ctx: EditContext) => EditResult): boolean {
+  const existing = findEntryConfig(doc);
+  const config = existing ?? (doc.createNode({}) as unknown as YAMLMap);
+  const attached = existing !== undefined;
+  const appendEntry = (): void => {
+    const seq = doc.contents as YAMLSeq;
+    // 空文件重建的文档是流式 `[]`，追加时重置为块式输出（与手写 patch 形态一致）
+    seq.flow = false;
+    const entry = new YAMLMap();
+    entry.set('id', ENTRY_ID);
+    entry.set('config', config);
+    seq.add(entry);
+  };
+  const before = doc.toString({ lineWidth: 0 });
+  edit({ config, attached, appendEntry });
+  return doc.toString({ lineWidth: 0 }) !== before;
+}
+
+/** 写入字面量字符串（覆盖已有的 !!js 表达式等节点） */
+function setPlainValue(config: YAMLMap, key: string, value: string): void {
+  config.set(key, value);
 }
 
 /**
- * 将凭据写入 dsh profile 的 cordis.patch.yml
+ * 将凭据写入 dsh profile 的 cordis.patch.yml。
  *
- * 用 js-yaml 解析现有文件后更新/追加 im-qqbot 条目，再 dump 写回，
- * 保证输出始终是合法 YAML。文件不存在或为空时安全重建；
- * 解析失败或结构异常时拒绝写入、保留原文件（避免覆盖用户其他配置）。
+ * 更新或追加 im-qqbot 条目的 appId/appSecret，其余内容（其他插件条目、
+ * insert 行、注释、锚点、`!!js` 表达式）原样保留。文件不存在时安全重建。
  */
 export function persistCredentialsToProfile(
   credentials: SetupCredentials,
@@ -35,54 +211,39 @@ export function persistCredentialsToProfile(
   logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
 ): boolean {
   const log = logger ?? console;
-  const dir = profileDir;
-  if (!dir) {
+  if (!profileDir) {
     // 开发模式：插件从源码加载、不在 node_modules 下，无法定位 profile 目录
     printEnvInstructions(credentials);
     return false;
   }
 
-  const patchPath = resolve(dir, 'cordis.patch.yml');
-
   try {
-    // 1. 解析现有条目（文件不存在/为空才重建；解析失败会抛错，保留原文件）
-    let entries: PatchEntry[] = [];
-    if (existsSync(patchPath)) {
-      entries = parsePatchEntries(readFileSync(patchPath, 'utf8'));
+    const ok = editProfilePatch(
+      profileDir,
+      ({ config, attached, appendEntry }) => {
+        setPlainValue(config, 'appId', credentials.appId);
+        setPlainValue(config, 'appSecret', credentials.appSecret);
+        if (!attached) appendEntry();
+        return true;
+      },
+      {},
+      (config) => config !== undefined
+        && config.get('appId') === credentials.appId
+        && config.get('appSecret') === credentials.appSecret,
+      log,
+    );
+    if (ok) {
+      log.info(`✔ 凭据已写入: ${resolve(profileDir, 'cordis.patch.yml')}`);
+      log.info(`  下次启动将自动使用保存的凭据`);
     }
-
-    // 2. 查找已有 im-qqbot 条目
-    const existing = entries.find((e) => e.id === 'im-qqbot');
-
-    if (existing) {
-      // 更新已有条目的 config
-      existing.config = {
-        ...(existing.config ?? {}),
-        appId: credentials.appId,
-        appSecret: credentials.appSecret,
-      };
-    } else {
-      // 追加新条目
-      entries.push({
-        id: 'im-qqbot',
-        config: {
-          appId: credentials.appId,
-          appSecret: credentials.appSecret,
-        },
-      });
-    }
-
-    // 3. dump 写回（保证合法 YAML）
-    //    先确保 profile 目录存在（文件不存在时也能正常创建，而非误入 ENOENT）
-    const output = `# QQ 机器人凭据（扫码绑定自动生成）\n${yaml.dump(entries)}`;
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(patchPath, output, 'utf8');
-    log.info(`✔ 凭据已写入: ${patchPath}`);
-    log.info(`  下次启动将自动使用保存的凭据`);
-    return true;
+    return ok;
   } catch (err) {
+    if (err instanceof PatchFormatError) {
+      log.warn(`拒绝写入 cordis.patch.yml: ${err.message}（原文件保留）`);
+      return false;
+    }
     log.warn(`写入配置失败: ${err instanceof Error ? err.message : String(err)}`);
-    printYamlInstructions(credentials, patchPath);
+    printYamlInstructions(credentials, resolve(profileDir, 'cordis.patch.yml'));
     return false;
   }
 }
@@ -90,40 +251,40 @@ export function persistCredentialsToProfile(
 /**
  * 从 dsh profile 的 cordis.patch.yml 中移除已保存的凭据（解绑）。
  *
- * 保留 im-qqbot 条目的其余 config（requireMention 等用户配置），
- * 仅删除 appId/appSecret 字段；条目或字段不存在时幂等成功。
- * 移除后写入触发 HMR 重载，插件回到未绑定态（绑定流程重新可用）。
+ * 保留 im-qqbot 条目的其余 config（requireMention 等用户配置）与其他所有
+ * 条目。条目或字段不存在时仍强制写回一次——宿主 HMR 靠文件 mtime 触发
+ * 重载，不写则 bound fiber 永不卸载，解绑后状态会停留在 bound。
  */
 export function removeCredentialsFromProfile(
   profileDir?: string,
   logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
 ): boolean {
   const log = logger ?? console;
-  if (!profileDir) {
-    return false;
-  }
-
-  const patchPath = resolve(profileDir, 'cordis.patch.yml');
+  if (!profileDir) return false;
 
   try {
-    if (!existsSync(patchPath)) return true; // 无 patch 文件 = 无凭据，幂等成功
-
-    const entries = parsePatchEntries(readFileSync(patchPath, 'utf8'));
-    const entry = entries.find((e) => e.id === 'im-qqbot');
-    if (entry?.config !== undefined) {
-      delete entry.config.appId;
-      delete entry.config.appSecret;
+    const ok = editProfilePatch(
+      profileDir,
+      ({ config }) => {
+        if (config.has('appId')) config.delete('appId');
+        if (config.has('appSecret')) config.delete('appSecret');
+        return true;
+      },
+      { force: true },
+      (config) => config === undefined
+        || (config.get('appId') === undefined && config.get('appSecret') === undefined),
+      log,
+    );
+    if (ok) {
+      log.info(`✔ 凭据已移除: ${resolve(profileDir, 'cordis.patch.yml')}`);
+      log.info(`  插件将重新进入绑定流程`);
     }
-
-    // 无条件写回：幂等场景（凭据字段已不存在）也更新 mtime——
-    // 宿主 HMR 靠文件变化触发重载，不写则 bound fiber 永不卸载，
-    // 解绑后状态会一直停留在 bound
-    mkdirSync(profileDir, { recursive: true });
-    writeFileSync(patchPath, yaml.dump(entries), 'utf8');
-    log.info(`✔ 凭据已移除: ${patchPath}`);
-    log.info(`  插件将重新进入绑定流程`);
-    return true;
+    return ok;
   } catch (err) {
+    if (err instanceof PatchFormatError) {
+      log.warn(`拒绝写入 cordis.patch.yml: ${err.message}（原文件保留）`);
+      return false;
+    }
     log.warn(`移除凭据失败: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
@@ -149,67 +310,34 @@ export function updateProfileConfig(
     return false;
   }
 
-  const patchPath = resolve(profileDir, 'cordis.patch.yml');
-
   try {
-    let entries: PatchEntry[] = [];
-    if (existsSync(patchPath)) {
-      entries = parsePatchEntries(readFileSync(patchPath, 'utf8'));
+    const ok = editProfilePatch(
+      profileDir,
+      ({ config, attached, appendEntry }) => {
+        for (const [key, value] of Object.entries(configPatch)) {
+          if (key === 'appId' || key === 'appSecret') continue;
+          config.set(key, value);
+        }
+        if (!attached) appendEntry();
+        return true;
+      },
+      {},
+      (config) => config !== undefined,
+      log,
+    );
+    if (ok) {
+      log.info(`✔ 配置已保存: ${resolve(profileDir, 'cordis.patch.yml')}`);
+      log.info(`  插件将自动重载`);
     }
-
-    const entry = entries.find((e) => e.id === 'im-qqbot');
-    if (entry !== undefined) {
-      const existing = (entry.config ?? {}) as Record<string, unknown>;
-      // 只覆盖提交键；appId/appSecret 由绑定流程管理，防御性保留
-      const next: Record<string, unknown> = { ...existing };
-      for (const [key, value] of Object.entries(configPatch)) {
-        if (key === 'appId' || key === 'appSecret') continue;
-        next[key] = value;
-      }
-      entry.config = next;
-    } else {
-      const { appId: _a, appSecret: _s, ...rest } = configPatch;
-      entries.push({ id: 'im-qqbot', config: rest });
-    }
-
-    mkdirSync(profileDir, { recursive: true });
-    writeFileSync(patchPath, yaml.dump(entries), 'utf8');
-    log.info(`✔ 配置已保存: ${patchPath}`);
-    log.info(`  插件将自动重载`);
-    return true;
+    return ok;
   } catch (err) {
+    if (err instanceof PatchFormatError) {
+      log.warn(`拒绝写入 cordis.patch.yml: ${err.message}（原文件保留）`);
+      return false;
+    }
     log.warn(`保存配置失败: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
-}
-
-/**
- * 解析 cordis.patch.yml 为条目数组
- *
- * - 空内容 / 仅注释（yaml.load 返回 null/undefined）→ 空数组（允许安全重建）
- * - 空数组 `[]` / 条目列表 → 过滤出含 id 的对象
- * - 非空但过滤后无任何可识别条目（如 bundle patch 的 `- insert: [...]`
- *   结构）→ 抛错（由调用方保留原文件——此类文件不是 profile 用户 patch，
- *   整体重写会破坏其原有内容）
- * - 非数组结构 / YAML 语法错误 → 抛错（由调用方保留原文件，避免覆盖用户其他配置）
- */
-function parsePatchEntries(content: string): PatchEntry[] {
-  if (!content.trim()) return [];
-
-  const parsed = yaml.load(content);
-  // 仅注释/空白 → null/undefined，等价于空文件，允许重建
-  if (parsed === null || parsed === undefined) return [];
-  if (!Array.isArray(parsed)) {
-    throw new Error('cordis.patch.yml 顶层必须是 YAML 数组');
-  }
-  const entries = parsed.filter(
-    (e): e is PatchEntry =>
-      typeof e === 'object' && e !== null && typeof (e as Record<string, unknown>).id === 'string',
-  );
-  if (parsed.length > 0 && entries.length === 0) {
-    throw new Error('cordis.patch.yml 含条目但无带 id 的 patch 行（可能是 bundle patch，拒绝写入以保留原文件）');
-  }
-  return entries;
 }
 
 /** 开发模式引导：未定位到 profile 目录，引导用环境变量配置（console.log 确保可见） */

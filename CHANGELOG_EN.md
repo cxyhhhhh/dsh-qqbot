@@ -6,6 +6,12 @@ This file records significant dsh-qqbot updates from a product perspective, focu
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.5.4] - 2026-10-28
+
+### Fixed
+
+- **Saving configuration no longer clobbers other plugins**: binding, saving settings, and unbinding now edit cordis.patch.yml in place — other plugins' entries and comments are preserved instead of the whole file being rewritten. (#53)
+
 ## [0.5.3] - 2026-10-27
 
 ### Added
