@@ -126,6 +126,13 @@ function stringSchema(name: string): (value: unknown) => unknown {
 const MAX_MANUAL_BODY_BYTES = 4096;
 
 /**
+ * config 请求体大小上限：对齐 Schema 的业务边界——白名单字符串字段单个
+ * 允许 20000 字符（全中文 UTF-8 约 60KB），allowlist 不设条目上限（openid
+ * 短标识，512KB 约容纳 1.4 万条）。上限只是反滥用闸门，语义校验在 Schema。
+ */
+const MAX_CONFIG_BODY_BYTES = 512 * 1024;
+
+/**
  * 注册绑定路由（状态查询 / 刷新二维码 / 手动凭据）。
  *
  * @param webServer - ctx.webServer
@@ -243,13 +250,13 @@ function handleRefresh(req: IncomingMessage, res: ServerResponse, service: Bindi
 }
 
 /** 读取并解析 JSON 请求体（带大小上限） */
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+async function readJsonBody(req: IncomingMessage, maxBytes: number = MAX_MANUAL_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buffer = chunk as Buffer;
     size += buffer.length;
-    if (size > MAX_MANUAL_BODY_BYTES) throw new Error('request body too large');
+    if (size > maxBytes) throw new Error('request body too large');
     chunks.push(buffer);
   }
   if (size === 0) throw new Error('empty request body');
@@ -364,7 +371,7 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
 
   let body: unknown;
   try {
-    body = await readJsonBody(req);
+    body = await readJsonBody(req, MAX_CONFIG_BODY_BYTES);
   } catch (err) {
     sendJson(res, 400, { ok: false, error: `invalid request body: ${err instanceof Error ? err.message : String(err)}` });
     return;

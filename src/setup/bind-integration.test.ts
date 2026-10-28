@@ -255,6 +255,57 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     expect(statSync(patchPath).mtimeMs).toBe(past.getTime()); // 无变化 → 无写 → mtime 不动
   });
 
+  it('配置保存（长 prompt）：超过 4KB 的请求体正常保存（#69）', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-large-'));
+    patchPath = join(dir, 'cordis.patch.yml');
+    writeFileSync(patchPath, SHARED_PATCH, 'utf8');
+    profileDirState.dir = dir;
+
+    const routes = registerRealRoutes(() => null);
+    const longPrompt = '你是一个专业的 QQ 群助手。'.repeat(400); // ~8KB UTF-8
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', JSON.stringify({ groupPrompt: longPrompt })), res);
+
+    expect(res.statusCode).toBe(200);
+    const after = readFileSync(patchPath, 'utf8');
+    expect(after).toContain('你是一个专业的 QQ 群助手。');
+    expectSharedPreserved(patchPath);
+  });
+
+  it('manual 请求体仍受 4KB 上限约束', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-manual-cap-'));
+    patchPath = join(dir, 'cordis.patch.yml');
+    writeFileSync(patchPath, SHARED_PATCH, 'utf8');
+    profileDirState.dir = dir;
+    const before = readFileSync(patchPath, 'utf8');
+
+    const routes = registerRealRoutes(() => null);
+    const res = fakeRes();
+    const oversized = JSON.stringify({ appId: 'a'.repeat(5000), appSecret: 's' });
+    await invoke(routes.get(BIND_MANUAL_PATH), fakeReq('POST', oversized), res);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({ ok: false });
+    expect(readFileSync(patchPath, 'utf8')).toBe(before);
+  });
+
+  it('allowlist 大列表可保存（仅受 512KB body 上限约束）', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-allow-'));
+    patchPath = join(dir, 'cordis.patch.yml');
+    writeFileSync(patchPath, SHARED_PATCH, 'utf8');
+    profileDirState.dir = dir;
+
+    const routes = registerRealRoutes(() => null);
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', JSON.stringify({
+      access: { c2cMode: 'allowlist', c2cAllow: Array.from({ length: 5000 }, (_v, i) => `openid-${i}`), groupMode: 'open', groupAllow: [] },
+    })), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(readFileSync(patchPath, 'utf8')).toContain('openid-4999');
+    expectSharedPreserved(patchPath);
+  });
+
   it('扫码链路：二维码 → 扫码成功 → 凭据落盘，多插件配置保留', async () => {
     dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-qr-'));
     patchPath = join(dir, 'cordis.patch.yml');

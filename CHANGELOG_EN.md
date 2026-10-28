@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **Saving configuration no longer clobbers other plugins**: binding, saving settings, and unbinding now edit cordis.patch.yml in place — other plugins' entries and comments are preserved instead of the whole file being rewritten. (#53)
+- **Long prompts can be saved**: the settings-save request body limit is raised from 4KB to 512KB, so long system / group prompts and large allowlists are no longer rejected. (#69)
 
 ## [0.5.3] - 2026-10-27
 
