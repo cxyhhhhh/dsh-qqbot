@@ -218,7 +218,7 @@ src/
 
 ## 会话路由
 
-sessionKey: `qqbot:${appId}:${scope}:${peerId}`，由 SHA-256 确定性派生 SessionId，重启后可恢复。
+sessionKey: `qqbot:${appId}:${scope}:${peerId}`，新会话铸造 UUID 会话 id 并持久化到 `model-prefs.json`，重启后按持久化 id 恢复；0.5.x 老会话按原派生 id 沿用。
 
 解析策略：进程内复用 → 持久化恢复 → 全新创建。
 

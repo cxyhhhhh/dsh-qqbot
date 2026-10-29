@@ -209,7 +209,7 @@ src/
 
 ## Session Routing
 
-sessionKey: `qqbot:${appId}:${scope}:${peerId}`, with the SessionId derived deterministically via SHA-256 so sessions survive restarts.
+sessionKey: `qqbot:${appId}:${scope}:${peerId}`; a UUID session id is minted for new sessions and persisted to `model-prefs.json`, resuming by the persisted id after restarts; pre-0.6 sessions keep their originally derived ids.
 
 Resolution strategy: in-process reuse → persisted resume → fresh create.
 

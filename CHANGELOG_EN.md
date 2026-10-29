@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Saving configuration no longer clobbers other plugins**: binding, saving settings, and unbinding only touch this plugin's own entry; other plugins' content and comments are preserved. (#53)
 - **Long prompts can be saved**: the settings-save request body limit is raised from 4KB to 512KB. (#69)
 - **Vision-path hazard fixed**: the `qqbot_describe_image` message source now uses the current session format, so future image injection into the main conversation will not fail. (#77)
+- **Session-id fix**: new sessions now carry the `session-` prefix and use randomly minted ids (#81) — community plugins no longer mistake QQ sessions for subagent sessions, and multi-process concurrency can no longer produce duplicate ids; existing sessions keep their original ids with history intact.
 
 ## [0.5.3] - 2026-10-27
 

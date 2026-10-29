@@ -12,7 +12,7 @@
  * 支持 agent-presets 系统：通过 setup hook 在 create/resume 时
  * 挂载 preset（工具集、prompt sections 等），实现场景化配置。
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
@@ -308,7 +308,7 @@ export class SessionManager {
       return;
     }
 
-    const childId = SessionId(randomUUID());
+    const childId = SessionId(mintSessionId());
     const effectiveRoute = options.route ?? this.modelResolver.getEffectiveRoute(key);
     const composed = await this.composePreset(this.getEffectivePresetByKey(key));
     const created = await this.agents.create({
@@ -431,13 +431,16 @@ export class SessionManager {
     return `qqbot:${this.config.appId}:${scope}:${peerId}`;
   }
 
-  private deriveSessionId(sessionKey: string): string {
-    const hash = createHash('sha256').update(sessionKey).digest('hex');
-    return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+  /** prefs 命中沿用；miss 返回 0.5.x 派生候选，由 getOrCreate 按 resume 结果迁移或铸造 */
+  private currentSessionId(sessionKey: string): string {
+    return this.modelResolver.getSessionId(sessionKey) ?? legacyDerivedSessionId(sessionKey);
   }
 
-  private currentSessionId(sessionKey: string): string {
-    return this.modelResolver.getSessionId(sessionKey) ?? this.deriveSessionId(sessionKey);
+  /** 候选命中后落盘，后续永远走 prefs */
+  private persistSessionId(sessionKey: string, sessionId: string): void {
+    if (this.modelResolver.getSessionId(sessionKey) !== sessionId) {
+      this.modelResolver.setSessionId(sessionKey, sessionId);
+    }
   }
 
   private async composePreset(presetId?: string): Promise<PresetComposition> {
@@ -478,7 +481,7 @@ export class SessionManager {
     }
 
     const route = this.modelResolver.getEffectiveRoute(key);
-    const sessionId = SessionId(this.currentSessionId(key));
+    let sessionId = SessionId(this.currentSessionId(key));
     this.logger.info(`getOrCreate: key=${key} route=${route ? `${route.provider}/${route.model}` : 'host-default'} sessionId=${sessionId}`);
 
     let agent: DshAgent;
@@ -488,6 +491,7 @@ export class SessionManager {
     const live = this.agents.get(sessionId);
     if (live) {
       agent = live;
+      this.persistSessionId(key, sessionId);
       this.logger.info(`reusing live agent: key=${key}`);
     } else {
       // preset 只解析一次：resume/create 共用同一组合，避免重复 resolve/mount 目录。
@@ -504,8 +508,16 @@ export class SessionManager {
         });
         agent = resumed.agent;
         handle = resumed;
+        // 0.5.x 迁移：候选命中老会话，沿用并落盘
+        this.persistSessionId(key, sessionId);
         this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
       } catch {
+        // 无存量会话：弃用候选，铸造新 id
+        if (!this.modelResolver.getSessionId(key)) {
+          sessionId = SessionId(mintSessionId());
+          this.modelResolver.setSessionId(key, sessionId);
+          this.logger.info(`migrated to minted session id: key=${key} sessionId=${sessionId}`);
+        }
         const created = await this.agents.create({
           sessionId,
           meta: {
@@ -555,7 +567,7 @@ export class SessionManager {
   async remove(scope: ChatScope, peerId: string): Promise<void> {
     const key = this.sessionKey(scope, peerId);
     const record = this.sessions.get(key);
-    this.modelResolver.setSessionId(key, randomUUID());
+    this.modelResolver.setSessionId(key, mintSessionId());
 
     if (!record) return;
     this.sessions.delete(key);
