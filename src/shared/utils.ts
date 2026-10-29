@@ -3,7 +3,7 @@
  *
  * 纯函数与常量，供插件入口与其他模块复用。
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, resolve } from 'node:path';
@@ -69,6 +69,39 @@ export function getProfileDir(baseDir: string = PLUGIN_ROOT): string | null {
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
+  }
+
+  // link: 安装（hoisted symlink）：插件真实路径在 node_modules 之外，正向反推
+  // 必失败；反查 profiles/*/node_modules 里指向本插件根的 symlink（#78）。
+  // Node 解析 import.meta.url 时已 realpath，故 PLUGIN_ROOT 即真实路径。
+  return findProfileBySymlink(baseDir);
+}
+
+/**
+ * 遍历 DSH_HOME/profiles/*，找到 node_modules 里存在指向 baseDir 的
+ * symlink 的 profile 目录（DSH_HOME 环境变量优先，缺省 ~/.dsh）。
+ */
+function findProfileBySymlink(baseDir: string): string | null {
+  const home = process.env.DSH_HOME ?? resolve(os.homedir(), '.dsh');
+  const profilesRoot = resolve(home, 'profiles');
+  if (!existsSync(profilesRoot)) return null;
+  let realBase: string;
+  try {
+    realBase = realpathSync(baseDir);
+  } catch {
+    return null;
+  }
+  let entries: string[];
+  try {
+    entries = readdirSync(profilesRoot);
+  } catch {
+    return null;
+  }
+  for (const name of entries) {
+    const linked = resolve(profilesRoot, name, 'node_modules', '@tencent-connect', 'dsh-qqbot');
+    try {
+      if (realpathSync(linked) === realBase) return resolve(profilesRoot, name);
+    } catch { /* 该 profile 未装本插件或链接损坏 */ }
   }
   return null;
 }

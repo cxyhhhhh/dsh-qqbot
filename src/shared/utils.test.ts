@@ -6,7 +6,7 @@
  * 2. CLI 浅层 npm 布局（标志文件或 node_modules 启发式）
  * 3. 开发模式源码目录（无命中返回 null）
  */
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, afterEach } from 'vitest';
@@ -28,6 +28,40 @@ afterEach(() => {
 });
 
 describe('getProfileDir', () => {
+  it('link: 安装（symlink）：反查 profiles/*/node_modules 命中 profile 根（#78）', () => {
+    const root = tempDir();
+    // 插件源码目录（node_modules 之外）
+    const pluginSrc = join(root, 'plugin-src', 'dsh-qqbot');
+    mkdirSync(pluginSrc, { recursive: true });
+    // profile 通过 symlink 安装
+    const profile = join(root, 'home', 'profiles', 'web');
+    const linked = join(profile, 'node_modules', '@tencent-connect', 'dsh-qqbot');
+    mkdirSync(join(profile, 'node_modules', '@tencent-connect'), { recursive: true });
+    symlinkSync(pluginSrc, linked);
+
+    process.env.DSH_HOME = join(root, 'home');
+    try {
+      expect(getProfileDir(pluginSrc)).toBe(profile);
+    } finally {
+      delete process.env.DSH_HOME;
+    }
+  });
+
+  it('link: 安装但 DSH_HOME 下无对应 symlink：返回 null', () => {
+    const root = tempDir();
+    const pluginSrc = join(root, 'plugin-src', 'dsh-qqbot');
+    mkdirSync(pluginSrc, { recursive: true });
+    const home = join(root, 'home', 'profiles');
+    mkdirSync(join(home, 'other'), { recursive: true });
+
+    process.env.DSH_HOME = join(root, 'home');
+    try {
+      expect(getProfileDir(pluginSrc)).toBeNull();
+    } finally {
+      delete process.env.DSH_HOME;
+    }
+  });
+
   it('Desktop pnpm 嵌套布局：按 profile 标志文件命中 profile 根', () => {
     const root = tempDir();
     const profile = join(root, 'profiles', 'desktop');

@@ -306,7 +306,8 @@ export function updateProfileConfig(
 ): boolean {
   const log = logger ?? console;
   if (!profileDir) {
-    log.warn('未定位到 profile 目录，配置无法持久化');
+    log.warn('未定位到 profile 目录（源码直载或非常规安装），配置未保存');
+    log.warn('请手动编辑对应 profile 的 cordis.patch.yml（im-qqbot 条目的 config）后重启生效');
     return false;
   }
 
