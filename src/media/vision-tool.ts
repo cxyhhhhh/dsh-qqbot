@@ -120,12 +120,15 @@ async function callVision(
   imageRef: ImageAttachmentRef,
   signal: AbortSignal,
 ): Promise<string> {
+  // v4 producer-owned source kind（迁移器同款改写）；本地 dsh-llm 类型尚为 v3 联合，做类型桥接
+  const visionSource = { kind: 'plugin:dsh-im-qqbot' } as unknown as { kind: 'plugin'; plugin: string };
+
   const message = createUserMessage({
     content: [
       { type: 'image', attachment: imageRef },
       { type: 'text', text: prompt },
     ],
-    source: { kind: 'plugin', plugin: 'dsh-im-qqbot' },
+    source: visionSource,
   });
 
   const options: GenerateOptions = {
