@@ -252,13 +252,15 @@ function shallowEqual(a: unknown, b: unknown): boolean {
  * 保存仅提交变更键（服务端按白名单合并），保存成功后提示
  * HMR 重载语义（进行中的机器人会话将重置）。
  */
-export function ConfigPanel(): ReactNode {
+export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
   useConfigPanelStyles();
   const [initial, setInitial] = useState<ConfigWire | null>(null);
   const [form, setForm] = useState<ConfigWire | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 绑定相位变化时重拉配置（扫码落库的白名单等新值）
+  const bindPhase = props?.bindPhase;
 
   useEffect(() => {
     let stopped = false;
@@ -274,7 +276,7 @@ export function ConfigPanel(): ReactNode {
         if (!stopped) setLoadError(err instanceof Error ? err.message : String(err));
       });
     return () => { stopped = true; };
-  }, []);
+  }, [bindPhase]);
 
   const patch = useCallback(<K extends keyof ConfigWire>(key: K, value: ConfigWire[K]): void => {
     setForm((current) => current === null ? current : { ...current, [key]: value });
@@ -332,7 +334,7 @@ export function ConfigPanel(): ReactNode {
   }
 
   const dirty = (Object.keys(form) as Array<keyof ConfigWire>).some((key) => !shallowEqual(form[key], initial[key]));
-  const access: AccessControlWire = form.access ?? { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] };
+  const access: AccessControlWire = form.access ?? { c2cMode: 'allowlist', c2cAllow: [], groupMode: 'open', groupAllow: [] };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),

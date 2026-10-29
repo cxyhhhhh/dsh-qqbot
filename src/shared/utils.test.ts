@@ -47,6 +47,53 @@ describe('getProfileDir', () => {
     }
   });
 
+  it('link: 多 profile 共享同一源码：优先当前进程 argv 的 profile（dsh web 不误写 desktop）', () => {
+    const root = tempDir();
+    const pluginSrc = join(root, 'plugin-src', 'dsh-qqbot');
+    mkdirSync(pluginSrc, { recursive: true });
+    // desktop 与 web 两个 profile 都 symlink 同一份源码
+    for (const name of ['desktop', 'web']) {
+      const linked = join(root, 'home', 'profiles', name, 'node_modules', '@tencent-connect', 'dsh-qqbot');
+      mkdirSync(join(root, 'home', 'profiles', name, 'node_modules', '@tencent-connect'), { recursive: true });
+      symlinkSync(pluginSrc, linked);
+    }
+    process.env.DSH_HOME = join(root, 'home');
+    const argv = process.argv;
+    try {
+      // 裸子命令缩写：dsh web
+      process.argv = ['node', '/path/to/dsh', 'web'];
+      expect(getProfileDir(pluginSrc)).toBe(join(root, 'home', 'profiles', 'web'));
+      // --profile flag 形式
+      process.argv = ['node', '/path/to/dsh', '--profile', 'web'];
+      expect(getProfileDir(pluginSrc)).toBe(join(root, 'home', 'profiles', 'web'));
+    } finally {
+      process.argv = argv;
+      delete process.env.DSH_HOME;
+    }
+  });
+
+  it('link: 多 profile 共享同一源码：Electron 运行时判 desktop', () => {
+    const root = tempDir();
+    const pluginSrc = join(root, 'plugin-src', 'dsh-qqbot');
+    mkdirSync(pluginSrc, { recursive: true });
+    for (const name of ['desktop', 'web']) {
+      const linked = join(root, 'home', 'profiles', name, 'node_modules', '@tencent-connect', 'dsh-qqbot');
+      mkdirSync(join(root, 'home', 'profiles', name, 'node_modules', '@tencent-connect'), { recursive: true });
+      symlinkSync(pluginSrc, linked);
+    }
+    process.env.DSH_HOME = join(root, 'home');
+    const versions = process.versions as { electron?: string };
+    const had = versions.electron;
+    try {
+      versions.electron = '33.0.0';
+      expect(getProfileDir(pluginSrc)).toBe(join(root, 'home', 'profiles', 'desktop'));
+    } finally {
+      if (had === undefined) delete versions.electron;
+      else versions.electron = had;
+      delete process.env.DSH_HOME;
+    }
+  });
+
   it('link: 安装但 DSH_HOME 下无对应 symlink：返回 null', () => {
     const root = tempDir();
     const pluginSrc = join(root, 'plugin-src', 'dsh-qqbot');

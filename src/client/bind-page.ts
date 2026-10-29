@@ -161,12 +161,13 @@ function usePanelStyles(): void {
  *          gone 表示插件未启用（从未注册过路由），recheck 废弃当前
  *          定时器并立即重新轮询（新轮询链取代旧链，不产生双计时器）。
  */
-function useBindState(): { state: BindStateWire | null; gone: boolean; recheck: () => void } {
+export function useBindState(enabled = true): { state: BindStateWire | null; gone: boolean; recheck: () => void } {
   const [state, setState] = useState<BindStateWire | null>(null);
   const [gone, setGone] = useState(false);
   const recheckRef = useRef<() => void>(() => {});
 
   useEffect(() => {
+    if (!enabled) return;
     let stopped = false;
     let sawRoute = false;
     let generation = 0;
@@ -435,10 +436,18 @@ function UnboundView({ state }: { state: Extract<BindStateWire, { phase: 'waitin
   );
 }
 
-/** 依据宿主相位渲染面板主体（各展示位共用） */
-export function BindPanelBody(): ReactNode {
+/** 依据宿主相位渲染面板主体（可注入共享轮询结果避免双计时器） */
+export function BindPanelBody(props?: {
+  state?: BindStateWire | null;
+  gone?: boolean;
+  recheck?: () => void;
+}): ReactNode {
   usePanelStyles();
-  const { state, gone, recheck } = useBindState();
+  const injected = props?.state !== undefined;
+  const internal = useBindState(!injected);
+  const state = injected ? props.state : internal.state;
+  const gone = injected ? (props.gone ?? false) : internal.gone;
+  const recheck = injected ? (props.recheck ?? (() => {})) : internal.recheck;
   // 扫码成功的连接过渡场景需要保留最后一帧二维码：waiting 相位持续记录，
   // bound 后清空（避免下次解绑重绑时旧码闪现）
   const [lastQr, setLastQr] = useState<string | null>(null);

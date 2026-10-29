@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { createElement, type ReactNode } from 'react';
 import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
-import { BindPanelBody, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
+import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
 
 export const name = 'im-qqbot-client';
@@ -79,11 +79,12 @@ function BindGuideIcon(): ReactNode {
   );
 }
 
-/** 设置页「QQ Bot」栏目：面板常驻展示绑定状态 */
+/** 设置页栏目：共享一份绑定状态轮询，驱动绑定面板与配置刷新 */
 function QQBotSettingsSection(): ReactNode {
+  const { state, gone, recheck } = useBindState();
   return createElement('div', null,
-    createElement(BindPanelBody),
-    createElement(ConfigPanel),
+    createElement(BindPanelBody, { state, gone, recheck }),
+    createElement(ConfigPanel, { bindPhase: state?.phase }),
   );
 }
 

@@ -71,16 +71,12 @@ export function getProfileDir(baseDir: string = PLUGIN_ROOT): string | null {
     dir = parent;
   }
 
-  // link: 安装（hoisted symlink）：插件真实路径在 node_modules 之外，正向反推
-  // 必失败；反查 profiles/*/node_modules 里指向本插件根的 symlink（#78）。
-  // Node 解析 import.meta.url 时已 realpath，故 PLUGIN_ROOT 即真实路径。
+  // link: 安装（symlink）下插件真实路径在 node_modules 之外，正向反推必失败；
+  // 反查 profiles/*/node_modules 里指向本插件根的 symlink（#78）
   return findProfileBySymlink(baseDir);
 }
 
-/**
- * 遍历 DSH_HOME/profiles/*，找到 node_modules 里存在指向 baseDir 的
- * symlink 的 profile 目录（DSH_HOME 环境变量优先，缺省 ~/.dsh）。
- */
+/** 反查 symlink 命中 profile；多 profile 共享源码时优先当前进程的 profile */
 function findProfileBySymlink(baseDir: string): string | null {
   const home = process.env.DSH_HOME ?? resolve(os.homedir(), '.dsh');
   const profilesRoot = resolve(home, 'profiles');
@@ -91,6 +87,19 @@ function findProfileBySymlink(baseDir: string): string | null {
   } catch {
     return null;
   }
+  const match = (name: string): string | null => {
+    const linked = resolve(profilesRoot, name, 'node_modules', '@tencent-connect', 'dsh-qqbot');
+    try {
+      return realpathSync(linked) === realBase ? resolve(profilesRoot, name) : null;
+    } catch {
+      return null; // 该 profile 未装本插件或链接损坏
+    }
+  };
+  const current = currentProfileName();
+  if (current !== undefined) {
+    const exact = match(current);
+    if (exact !== null) return exact;
+  }
   let entries: string[];
   try {
     entries = readdirSync(profilesRoot);
@@ -98,12 +107,28 @@ function findProfileBySymlink(baseDir: string): string | null {
     return null;
   }
   for (const name of entries) {
-    const linked = resolve(profilesRoot, name, 'node_modules', '@tencent-connect', 'dsh-qqbot');
-    try {
-      if (realpathSync(linked) === realBase) return resolve(profilesRoot, name);
-    } catch { /* 该 profile 未装本插件或链接损坏 */ }
+    const hit = match(name);
+    if (hit !== null) return hit;
   }
   return null;
+}
+
+/** 从进程判据解析 profile 名：Electron → desktop；argv 的 --profile 或裸子命令缩写 */
+function currentProfileName(): string | undefined {
+  if ((process.versions as { electron?: string }).electron !== undefined) return 'desktop';
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] ?? '';
+    if (arg === '--profile') {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('-')) return next;
+    } else if (arg.startsWith('--profile=')) {
+      return arg.slice('--profile='.length);
+    }
+  }
+  const first = argv.find((a) => !a.startsWith('-'));
+  if (first !== undefined && first !== 'plugin') return first;
+  return undefined;
 }
 
 /**
