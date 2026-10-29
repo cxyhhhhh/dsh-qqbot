@@ -31,7 +31,11 @@ export function compactCommand({ manager }: CommandDeps): CategorizedCommand {
     description: '压缩会话历史（摘要替换旧记录，保留上下文）',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
-      const outcome = await manager.compact(scope, peerId);
+      const msg = cmdCtx.message;
+      const outcome = await manager.compact(scope, peerId, {
+        senderId: msg.senderId,
+        replyTarget: { scope, targetId: peerId, msgId: msg.messageId },
+      });
 
       if (outcome.ok) {
         if (!outcome.shadowed) return '没有可压缩的历史';

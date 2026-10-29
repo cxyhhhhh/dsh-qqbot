@@ -25,10 +25,10 @@ export interface DshAgent {
   readonly ctx: Context;
   /** 当前生命周期状态（用于判断是否正在生成） */
   readonly status: 'idle' | 'running';
-  /** 底层 session（fork 时作为 source，events 用于统计/导出） */
+  /** 底层 session（fork 时作为 source；snapshotEvents 用于统计/导出） */
   readonly session: {
     readonly id: string;
-    readonly events?: readonly SessionEventLike[];
+    snapshotEvents(): readonly SessionEventLike[];
   };
   cancel(cause: { kind: string }): void;
   followup(message: unknown): void;
@@ -74,11 +74,6 @@ export interface DshAgentHandle {
   dispose(): Promise<void>;
 }
 
-/** sessions 服务（fork 能力） */
-export interface SessionsService {
-  fork(source: unknown, boundary?: number): { events: readonly unknown[] };
-}
-
 export interface DshAgentRegistry {
   /** 获取进程内已存活的 agent */
   get(sessionId: string): DshAgent | undefined;
@@ -91,8 +86,10 @@ export interface DshAgentRegistry {
   /** 创建全新 session */
   create(options: {
     sessionId: string;
-    meta?: { cwd?: string; parentSession?: string; seedLength?: number; agentPreset?: string };
+    meta?: { cwd?: string; isSeeded?: boolean; parentSession?: string; agentPreset?: string };
     seed?: readonly unknown[];
+    /** 继承前缀长度（seeded fork 用，对齐宿官方 commands.fork） */
+    inheritedEventCount?: number;
     agentOptions?: { provider?: string; model?: string };
     setup?: AgentSetup;
   }): Promise<DshAgentHandle>;
@@ -105,8 +102,6 @@ export interface AgentPresetsLike {
   mount(agentCtx: Context, id?: string): Promise<unknown>;
   /** 列出所有可用 preset */
   list(): Promise<Array<{ id: string; name?: string; description?: string; broken?: string }>>;
-  /** 从 agent 的 preset scope 解析隔离服务（如 compaction），未挂载返回 undefined */
-  serviceFor(agent: { ctx: Context }, name: string): unknown | undefined;
 }
 
 /** 可用 preset 条目（/preset 命令展示用） */

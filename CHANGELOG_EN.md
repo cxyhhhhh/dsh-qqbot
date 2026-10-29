@@ -13,7 +13,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Saving configuration no longer clobbers other plugins**: binding, saving settings, and unbinding only touch this plugin's own entry; other plugins' content and comments are preserved. (#53)
 - **Long prompts can be saved**: the settings-save request body limit is raised from 4KB to 512KB. (#69)
 - **Vision-path hazard fixed**: the `qqbot_describe_image` message source now uses the current session format, so future image injection into the main conversation will not fail. (#77)
-- **Session-id fix**: new sessions now carry the `session-` prefix and use randomly minted ids (#81) — community plugins no longer mistake QQ sessions for subagent sessions, and multi-process concurrency can no longer produce duplicate ids; existing sessions keep their original ids with history intact.
+- **Hardened session ids**: unified `session-` prefix (#81) — community plugins no longer misjudge QQ sessions, multi-process concurrency produces no duplicate ids, and existing sessions keep their original ids.
+- **Fixed model switching**: both the `/model` crash and the "history failed to load" error after restarting post-switch are fixed, with conversation history fully preserved.
+- **Fixed session-event reads**: `/tokens` showing 0, `/export` producing empty output, and approval buttons not echoing the gated command — all fixed.
+- **Fixed compaction**: `/compact` wrongly reporting the service as unavailable or "no active session" — fixed; in the latter case the session is revived from disk before compacting.
+
+### Internal
+
+- Added a host-API adapter layer that uniformly supports both old and new host interface shapes.
 
 ## [0.5.3] - 2026-10-27
 

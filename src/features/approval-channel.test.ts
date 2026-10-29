@@ -49,7 +49,7 @@ function makeRequest(opts?: {
   toolName?: string;
   callId?: string;
   reason?: string;
-  events?: NonNullable<ApprovalRequest['agent']['session']>['events'];
+  events?: ReturnType<NonNullable<ApprovalRequest['agent']['session']>['snapshotEvents']>;
   signal?: AbortSignal;
   /** 模拟拿不到 live session 的审批上下文（跨进程/投影后的 Agent）。 */
   noSession?: boolean;
@@ -57,7 +57,7 @@ function makeRequest(opts?: {
   return {
     agent: opts?.noSession === true
       ? { id: opts?.id ?? 'sess-qq' }
-      : { id: opts?.id ?? 'sess-qq', session: { events: opts?.events ?? [] } },
+      : { id: opts?.id ?? 'sess-qq', session: { snapshotEvents: () => opts?.events ?? [] } },
     toolName: opts?.toolName ?? 'bash',
     ...(opts?.callId !== undefined ? { callId: opts.callId } : {}),
     ...(opts?.reason !== undefined ? { reason: opts.reason } : {}),

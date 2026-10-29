@@ -31,7 +31,7 @@ export interface ApprovalRequest {
      * 投影后的上下文，运行时拿不到 live session（类型契约与运行时的 gap）。此时
      * 只是无法回显命令原文，不应让整个审批失败，故这里标为可选。
      */
-    session?: { events?: ApprovalSessionEvent[] };
+    session?: { snapshotEvents?(): readonly ApprovalSessionEvent[] };
   };
   toolName: string;
   /** 关联的 tool/call 事件 id，用于从 session log 找回被 gate 的命令 */
@@ -86,7 +86,7 @@ function commandOf(req: ApprovalRequest): string | undefined {
   if (req.callId === undefined) return undefined;
   // 审批请求可能来自没有 live session 的上下文（例如跨进程/投影后的 Agent），
   // 此时只是拿不到命令原文，不能因此让整个审批失败。
-  const events = req.agent.session?.events;
+  const events = req.agent.session?.snapshotEvents?.();
   if (!Array.isArray(events)) return undefined;
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i];

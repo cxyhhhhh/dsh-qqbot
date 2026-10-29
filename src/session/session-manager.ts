@@ -15,6 +15,7 @@
 import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
+import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
@@ -26,7 +27,6 @@ import type {
   SessionEventLike,
   DshAgent,
   DshAgentHandle,
-  SessionsService,
   DshAgentRegistry,
   AgentPresetsLike,
   PresetComposition,
@@ -66,11 +66,34 @@ interface AssembledPrompt {
   [key: string]: unknown;
 }
 
+/** 复刻宿主 latestCompletedPrefixBoundary：最后一个 turn/end 起到下一 turn 开始前的边界 */
+export function latestCompletedPrefixBoundary(events: readonly unknown[]): number | undefined {
+  const list = events as Array<{ type?: string; seq?: number; surfaceOp?: string }>;
+  let lastTurnEndSeq: number | undefined;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const candidate = list[i];
+    if (candidate?.type === 'turn/end') {
+      lastTurnEndSeq = candidate.seq;
+      break;
+    }
+  }
+  if (lastTurnEndSeq === undefined) return undefined;
+  let boundary = lastTurnEndSeq;
+  for (const next of list.slice(boundary + 1)) {
+    if (next.type === 'turn/start'
+      || (next.type === 'user/message' && next.surfaceOp === 'append')
+      || next.type === 'agent/inbox/spliced') break;
+    if (next.seq !== undefined) boundary = next.seq;
+  }
+  return boundary;
+}
+
 export class SessionManager {
   private sessions = new Map<string, SessionRecord>();
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
+  private readonly host: HostAdapter;
   private readonly agents: DshAgentRegistry;
   private readonly config: ImQQBotConfig;
   private readonly logger: Logger;
@@ -89,6 +112,8 @@ export class SessionManager {
     this.agents = agents;
     this.config = config;
     this.logger = logger;
+    this.host = createHostAdapter(ctx, logger);
+    this.logger.info(`host adapter capabilities: ${this.host.capabilities.join(', ')}`);
     this.modelResolver = new ModelResolver(ctx, config, logger);
 
     this.evictor = new IdleEvictor(
@@ -139,17 +164,6 @@ export class SessionManager {
     (this.ctx as unknown as {
       on(event: 'system-prompt/assemble', handler: typeof assemble): void;
     }).on('system-prompt/assemble', assemble);
-  }
-
-  /**
-   * 动态获取 sessions 服务（fork 能力，可选）
-   */
-  private getSessionsService(): SessionsService | undefined {
-    try {
-      return this.ctx.get('sessions') as SessionsService | undefined;
-    } catch {
-      return undefined;
-    }
   }
 
   /**
@@ -288,20 +302,21 @@ export class SessionManager {
   ): Promise<void> {
     const key = record.sessionKey;
 
-    const sessionsService = this.getSessionsService();
-    if (!sessionsService) {
-      this.logger.warn(`fork unavailable, fallback to dispose: key=${key}`);
+    // 对齐宿主官方 fork（commands.fork）：buildForkSeed 产物原样作 seed，
+    // create 传 inheritedEventCount + isSeeded + parentSession
+    const events = this.host.sessionEvents(record.agent.session);
+    const boundary = latestCompletedPrefixBoundary(events);
+    if (boundary === undefined) {
+      this.logger.warn(`fork unavailable (no completed turn), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
       record.agent.cancel({ kind: 'user' });
       await record.handle.dispose().catch(() => {});
       return;
     }
 
-    let seed: readonly unknown[];
-    try {
-      seed = sessionsService.fork(record.agent.session).events;
-    } catch (err) {
-      this.logger.warn(`fork failed, fallback to dispose: key=${key} err=${err instanceof Error ? err.message : String(err)}`);
+    const seed = await this.host.buildForkSeed(events, boundary);
+    if (seed === undefined) {
+      this.logger.warn(`fork seed unavailable (old host), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
       record.agent.cancel({ kind: 'user' });
       await record.handle.dispose().catch(() => {});
@@ -314,10 +329,12 @@ export class SessionManager {
     const created = await this.agents.create({
       sessionId: childId,
       seed,
+      inheritedEventCount: boundary + 1,
       meta: {
         cwd: this.config.cwd || process.cwd(),
+        isSeeded: true,
+        // 旧版宿主的 delivery 豁免要求 parentSession，新版忽略——都传
         parentSession: record.sessionId,
-        seedLength: seed.length,
         ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}),
       },
       ...(effectiveRoute ? { agentOptions: effectiveRoute } : {}),
@@ -375,8 +392,9 @@ export class SessionManager {
   getTokenUsage(scope: ChatScope, peerId: string): TokenUsageStats {
     const record = this.getSessionRecord(scope, peerId);
     const stats: TokenUsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    if (!record) return stats;
 
-    const events = record?.agent.session.events;
+    const events = this.host.sessionEvents(record.agent.session) as readonly SessionEventLike[];
     if (!events) return stats;
 
     for (const event of events) {
@@ -394,7 +412,7 @@ export class SessionManager {
     const record = this.getSessionRecord(scope, peerId);
     if (!record) return '';
 
-    const events = record.agent.session.events;
+    const events = this.host.sessionEvents(record.agent.session) as readonly SessionEventLike[];
     if (!events || events.length === 0) return '';
 
     const lines: string[] = [`# QQ 会话导出\n`, `> session: ${record.sessionId}\n`];
@@ -413,7 +431,8 @@ export class SessionManager {
   }
 
   private countMessages(record: SessionRecord | undefined): number {
-    const events = record?.agent.session.events;
+    if (!record) return 0;
+    const events = this.host.sessionEvents(record.agent.session) as readonly SessionEventLike[];
     if (!events) return 0;
 
     let count = 0;
@@ -579,22 +598,25 @@ export class SessionManager {
   /**
    * 原地压缩当前会话历史（保留 sessionId，用摘要替换旧历史）。
    *
-   * 需通过 agentPresets.serviceFor(agent, 'compaction') 解析；未挂载时优雅降级。
-   * 这是「压缩上下文」的语义，区别于 remove() 的「换新会话」。
+   * compaction 是 preset 作用域服务，经 host adapter 从会话 preset 解析，
+   * 全局注册的部署再兜底。这是「压缩上下文」的语义，区别于 remove() 的「换新会话」。
    */
-  async compact(scope: ChatScope, peerId: string): Promise<CompactOutcome> {
+  async compact(
+    scope: ChatScope,
+    peerId: string,
+    revive?: { senderId: string; replyTarget: ReplyTarget },
+  ): Promise<CompactOutcome> {
     const key = this.sessionKey(scope, peerId);
-    const record = this.sessions.get(key);
-    if (!record) return { ok: false, reason: 'no-session' };
+    let record = this.sessions.get(key);
+    if (!record) {
+      // 无活跃会话（重启/闲置回收）时从磁盘拉起，历史在磁盘上仍可压缩
+      if (!revive) return { ok: false, reason: 'no-session' };
+      record = await this.getOrCreate(scope, peerId, revive.senderId, revive.replyTarget);
+    }
     if (record.agent.status !== 'idle') return { ok: false, reason: 'busy' };
 
-    let compaction: CompactionServiceLike | undefined;
-    try {
-      const presets = this.getPresetsService();
-      compaction = (presets?.serviceFor(record.agent, 'compaction') ?? this.ctx.get('compaction')) as CompactionServiceLike | undefined;
-    } catch {
-      compaction = undefined;
-    }
+    const compaction = (await this.host.serviceFor(record.agent, 'compaction')
+      ?? this.host.globalService('compaction')) as CompactionServiceLike | undefined;
     if (!compaction) return { ok: false, reason: 'unavailable' };
 
     const route = this.modelResolver.getEffectiveRoute(key);
