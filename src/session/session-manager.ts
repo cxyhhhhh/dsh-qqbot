@@ -16,6 +16,9 @@ import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
+import { mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
@@ -331,7 +334,7 @@ export class SessionManager {
       seed,
       inheritedEventCount: boundary + 1,
       meta: {
-        cwd: this.config.cwd || process.cwd(),
+        cwd: this.workspaceDir(),
         isSeeded: true,
         // 旧版宿主的 delivery 豁免要求 parentSession，新版忽略——都传
         parentSession: record.sessionId,
@@ -540,7 +543,7 @@ export class SessionManager {
         const created = await this.agents.create({
           sessionId,
           meta: {
-            cwd: this.config.cwd || process.cwd(),
+            cwd: this.workspaceDir(),
             ...(agentPreset ? { agentPreset } : {}),
           },
           ...(route ? { agentOptions: route } : {}),
@@ -593,6 +596,16 @@ export class SessionManager {
     record.agent.cancel({ kind: 'user' });
     await record.handle.dispose().catch(() => {});
     this.logger.info(`session removed: key=${key}`);
+  }
+
+  /** Agent 工作目录：显式配置优先，缺省独立目录 ~/.dsh-qqbot/workspace（不随宿主进程 cwd） */
+  private workspaceCache: string | undefined;
+  private workspaceDir(): string {
+    if (this.workspaceCache) return this.workspaceCache;
+    const dir = this.config.cwd ?? resolve(homedir(), '.dsh-qqbot', 'workspace');
+    mkdirSync(dir, { recursive: true });
+    this.workspaceCache = dir;
+    return dir;
   }
 
   /**

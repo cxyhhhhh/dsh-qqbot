@@ -165,7 +165,7 @@ export class BindingService {
               reject(new Error('扫码未返回有效凭据'));
               return;
             }
-            resolve({ appId: cred.appId, appSecret: cred.appSecret });
+            resolve({ appId: cred.appId, appSecret: cred.appSecret, userOpenid: cred.userOpenid });
           },
           onFailure: (error: Error) => {
             // refresh / dispose 触发的取消按「重启」或「静默退出」处理

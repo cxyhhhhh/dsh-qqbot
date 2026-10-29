@@ -133,7 +133,7 @@ export async function bootstrapGateway(
   questionChannel.install(ctx);
 
   // ── 审批通道（approval/request → QQ 两按钮审批） ──
-  const approvalChannel = new ApprovalChannel(manager, sender, logger);
+  const approvalChannel = new ApprovalChannel(manager, sender, config, logger);
   manager.approvalChannel = approvalChannel;
   approvalChannel.install(ctx as unknown as ApprovalChannelContext);
 

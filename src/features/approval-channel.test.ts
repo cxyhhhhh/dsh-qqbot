@@ -6,6 +6,7 @@ import {
   type ApprovalOutcome,
   type ApprovalRequest,
   type ApprovalSessionRecordLike,
+  type ApprovalChannelConfigLike,
   type ApprovalChannelContext,
 } from './approval-channel.ts';
 import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.ts';
@@ -29,6 +30,11 @@ function createSender(sent: SentMessage[]) {
 }
 
 const sessionKey = (scope: ChatScope, peerId: string): string => `qqbot:app:${scope}:${peerId}`;
+
+/** 默认开放模式（不校验）；allowlist 模式用 makeConfig('allowlist', [...]) */
+function makeConfig(c2cMode: 'open' | 'allowlist' | 'disabled' = 'open', c2cAllow: string[] = []): ApprovalChannelConfigLike {
+  return { access: { c2cMode, c2cAllow } };
+}
 
 function makeRecord(key: string, scope: ChatScope = 'c2c'): ApprovalSessionRecordLike {
   return { sessionKey: key, scope, replyTarget: { scope, targetId: 'x', msgId: 'm' } };
@@ -65,13 +71,14 @@ function makeRequest(opts?: {
   };
 }
 
-function makeEvent(data: string | undefined, peer: { user?: string; group?: string }): InteractionEvent {
+function makeEvent(data: string | undefined, peer: { user?: string; group?: string; member?: string }): InteractionEvent {
   return {
     id: 'i1',
     type: 1,
     version: 1,
     ...(peer.group ? { group_openid: peer.group } : {}),
     ...(peer.user ? { user_openid: peer.user } : {}),
+    ...(peer.member ? { group_member_openid: peer.member } : {}),
     data: { type: 1, resolved: { ...(data !== undefined ? { button_data: data } : {}) } },
   } as InteractionEvent;
 }
@@ -134,6 +141,7 @@ describe('ApprovalChannel.install', () => {
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
+      makeConfig(),
       createLogger(),
     );
     const { handler } = installAndCapture(ch, sent);
@@ -159,6 +167,7 @@ describe('ApprovalChannel.install', () => {
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
+      makeConfig(),
       createLogger(),
     );
     const { handler } = installAndCapture(ch, sent);
@@ -176,6 +185,7 @@ describe('ApprovalChannel.install', () => {
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: () => undefined }),
       createSender([]),
+      makeConfig(),
       createLogger(),
     );
     const { handler, options } = installAndCapture(ch, []);
@@ -183,11 +193,61 @@ describe('ApprovalChannel.install', () => {
     expect(options).toEqual({ global: true, prepend: true });
   });
 
+  it('allowlist 模式：非授权成员点击群审批按钮无效，授权成员放行（#83）', async () => {
+    const sent: SentMessage[] = [];
+    const ch = new ApprovalChannel(
+      createManager({
+        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
+      }),
+      createSender(sent),
+      makeConfig('allowlist', ['owner-1']),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+    expect(sent).toHaveLength(1);
+
+    // 群互动事件点击者字段为 group_member_openid（user_openid 不填）：
+    // 非授权成员点击 → 拒绝（审批保持挂起）
+    const stranger = ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { group: 'group-1', member: 'stranger-9' }));
+    expect(stranger).toBe(false);
+
+    // 授权成员（群成员标识在名单内）点击 → 放行
+    const owner = ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { group: 'group-1', member: 'owner-1' }));
+    expect(owner).toBe(true);
+    await expect(p).resolves.toBe('allowed-once');
+  });
+
+  it('allowlist 模式：私聊卡片转发给他人点击无效', async () => {
+    const sent: SentMessage[] = [];
+    const ch = new ApprovalChannel(
+      createManager({
+        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined),
+      }),
+      createSender(sent),
+      makeConfig('allowlist', ['peer-qq']),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+
+    // 转发场景：点击者 user_openid ≠ 名单成员 → 无效
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { user: 'forwarded-user' }))).toBe(false);
+
+    ch.cancelPending(sessionKey('c2c', 'peer-qq'));
+    await expect(p).resolves.toBe('cancelled');
+  });
+
   it('still sends the prompt when the session log is unavailable', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
+      makeConfig(),
       createLogger(),
     );
     const { handler } = installAndCapture(ch, sent);
@@ -208,6 +268,7 @@ describe('ApprovalChannel.handleInteraction', () => {
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
+      makeConfig(),
       createLogger(),
     );
     const { handler } = installAndCapture(ch, sent);
@@ -229,6 +290,7 @@ describe('ApprovalChannel.cancelPending', () => {
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
+      makeConfig(),
       createLogger(),
     );
     const { handler } = installAndCapture(ch, sent);
@@ -244,6 +306,7 @@ describe('ApprovalChannel.cancelPending', () => {
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       { sendMarkdown: vi.fn(async () => { throw new Error('network down'); }) },
+      makeConfig(),
       createLogger(),
     );
     const { handler } = installAndCapture(ch, []);

@@ -24,9 +24,4 @@
         maxQueue: 20
         processingTimeoutMs: 1800000
         historyLimit: 10
-        access:
-          c2cMode: open
-          c2cAllow: []
-          groupMode: open
-          groupAllow: []
         debug: false

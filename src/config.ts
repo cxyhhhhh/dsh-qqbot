@@ -63,7 +63,7 @@ export interface ImQQBotConfig {
   model?: string;
   /** Agent preset id */
   preset?: string;
-  /** Agent 工作目录（缺省回落到进程 cwd） */
+  /** Agent 工作目录（缺省 ~/.dsh-qqbot/workspace，不随宿主进程 cwd） */
   cwd?: string;
   /** 是否启用群消息 @mention 门控 */
   requireMention: boolean;
@@ -101,10 +101,10 @@ export interface ImQQBotConfig {
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
 export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
-  c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式'),
-  c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单'),
-  groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式'),
-  groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单'),
+  c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('allowlist').description('C2C访问模式（默认白名单，空名单拒绝所有人）'),
+  c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单（QQ OpenID）'),
+  groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式（默认开放：群自带进群门槛 + @bot 触发）'),
+  groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单（群 OpenID）'),
 });
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -113,7 +113,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   provider: Schema.string().description('LLM provider name'),
   model: Schema.string().description('Model name'),
   preset: Schema.string().description('Agent preset id'),
-  cwd: Schema.string().description('Agent working directory'),
+  cwd: Schema.string().description('Agent working directory (default ~/.dsh-qqbot/workspace)'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),

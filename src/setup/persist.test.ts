@@ -64,6 +64,51 @@ describe('persistCredentialsToProfile', () => {
     expect(entryIds(after)).toEqual(['insert', 'ui-settings', 'im-qqbot', 'llm-deepseek']);
   });
 
+  it('userOpenid 覆盖 c2cAllow 并切到白名单模式（旧扫码者不残留），保留群配置', () => {
+    writeFileSync(patchPath, [
+      '- id: im-qqbot',
+      '  config:',
+      '    appId: old-app',
+      '    access:',
+      '      c2cMode: open',
+      '      c2cAllow:',
+      '        - old-owner',
+      '      groupMode: open',
+    ].join('\n'), 'utf8');
+
+    expect(persistCredentialsToProfile({ ...credentials, userOpenid: 'qr-user' }, dir, log)).toBe(true);
+
+    const after = readFileSync(patchPath, 'utf8');
+    expect(after).toContain('c2cMode: allowlist');
+    expect(after).toContain('groupMode: open');
+    expect(after).toContain('qr-user');
+    expect(after).not.toContain('old-owner');
+  });
+
+  it('userOpenid 相同时幂等（不重复）', () => {
+    writeFileSync(patchPath, [
+      '- id: im-qqbot',
+      '  config:',
+      '    access:',
+      '      c2cAllow: [qr-user]',
+    ].join('\n'), 'utf8');
+
+    expect(persistCredentialsToProfile({ ...credentials, userOpenid: 'qr-user' }, dir, log)).toBe(true);
+
+    const after = readFileSync(patchPath, 'utf8');
+    expect((after.match(/qr-user/g) ?? []).length).toBe(1);
+  });
+
+  it('无 access 配置时新建（白名单模式 + 仅扫码者，不固化群配置）', () => {
+    expect(persistCredentialsToProfile({ ...credentials, userOpenid: 'qr-user' }, dir, log)).toBe(true);
+
+    const after = readFileSync(patchPath, 'utf8');
+    expect(after).toContain('c2cMode: allowlist');
+    expect(after).toContain('c2cAllow');
+    expect(after).toContain('qr-user');
+    expect(after).not.toContain('groupMode');
+  });
+
   it('文件不存在时安全重建（新条目）', () => {
     expect(persistCredentialsToProfile(credentials, dir, log)).toBe(true);
     const after = readFileSync(patchPath, 'utf8');

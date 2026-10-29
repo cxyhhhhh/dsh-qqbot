@@ -21,6 +21,8 @@ import type { Logger } from '../types.ts';
 export interface SetupCredentials {
   appId: string;
   appSecret: string;
+  /** 扫码用户 openid（存在时自动加入私聊白名单） */
+  userOpenid?: string;
 }
 
 /** 宿主 Include 方言：保留 !!js 等自定义标签为字面量字符串 */
@@ -199,6 +201,30 @@ function setPlainValue(config: YAMLMap, key: string, value: string): void {
   config.set(key, value);
 }
 
+/** 用扫码者 openid 覆盖 c2cAllow 并切到白名单模式（重绑即换人）；群配置不动 */
+function overwriteC2cAllowlist(config: YAMLMap, openid: string): void {
+  const access = config.get('access', true);
+  if (!isMap(access)) {
+    config.set('access', { c2cMode: 'allowlist', c2cAllow: [openid] });
+    return;
+  }
+  const accessMap = access as YAMLMap;
+  accessMap.set('c2cMode', 'allowlist');
+  accessMap.set('c2cAllow', [openid]);
+}
+
+/** 校验 c2cMode 为白名单且 c2cAllow 恰为 openid（读回验证用） */
+function c2cAllowlistContains(config: YAMLMap, openid: string): boolean {
+  const access = config.get('access', true);
+  if (!isMap(access)) return false;
+  const accessMap = access as YAMLMap;
+  if (accessMap.get('c2cMode') !== 'allowlist') return false;
+  const allow = accessMap.get('c2cAllow', true);
+  if (!isSeq(allow)) return false;
+  const items = allow.items.filter((item) => isScalar(item));
+  return items.length === 1 && String((items[0] as { value: unknown }).value) === openid;
+}
+
 /**
  * 将凭据写入 dsh profile 的 cordis.patch.yml。
  *
@@ -223,17 +249,24 @@ export function persistCredentialsToProfile(
       ({ config, attached, appendEntry }) => {
         setPlainValue(config, 'appId', credentials.appId);
         setPlainValue(config, 'appSecret', credentials.appSecret);
+        if (credentials.userOpenid) {
+          overwriteC2cAllowlist(config, credentials.userOpenid);
+        }
         if (!attached) appendEntry();
         return true;
       },
       {},
       (config) => config !== undefined
         && config.get('appId') === credentials.appId
-        && config.get('appSecret') === credentials.appSecret,
+        && config.get('appSecret') === credentials.appSecret
+        && (!credentials.userOpenid || c2cAllowlistContains(config, credentials.userOpenid)),
       log,
     );
     if (ok) {
       log.info(`✔ 凭据已写入: ${resolve(profileDir, 'cordis.patch.yml')}`);
+      if (credentials.userOpenid) {
+        log.info(`  扫码用户已加入私聊白名单: ${credentials.userOpenid}`);
+      }
       log.info(`  下次启动将自动使用保存的凭据`);
     }
     return ok;

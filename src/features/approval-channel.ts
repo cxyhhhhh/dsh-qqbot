@@ -58,6 +58,14 @@ export interface ApprovalChannelSenderLike {
   sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: unknown }): Promise<unknown>;
 }
 
+/** 配置投影（审批按钮校验 allowlist 用） */
+export interface ApprovalChannelConfigLike {
+  access: {
+    c2cMode: 'open' | 'allowlist' | 'disabled';
+    c2cAllow: readonly string[];
+  };
+}
+
 /** approval/request waterfall 的 answerer handler */
 export interface ApprovalChannelContext {
   on(
@@ -114,14 +122,17 @@ export class ApprovalChannel {
   private readonly manager: ApprovalChannelManagerLike;
   private readonly sender: ApprovalChannelSenderLike;
   private readonly logger: Logger;
+  private readonly config: ApprovalChannelConfigLike;
 
   public constructor(
     manager: ApprovalChannelManagerLike,
     sender: ApprovalChannelSenderLike,
+    config: ApprovalChannelConfigLike,
     logger: Logger,
   ) {
     this.manager = manager;
     this.sender = sender;
+    this.config = config;
     this.logger = logger;
   }
 
@@ -156,7 +167,7 @@ export class ApprovalChannel {
     entry.resolve('cancelled');
   }
 
-  /** 按钮点击决策：解码 button_data，settle pending 审批 */
+  /** 按钮点击决策：解码 button_data，校验点击者授权，settle pending 审批 */
   public handleInteraction(event: InteractionEvent): boolean {
     const peerId = event.group_openid ?? event.user_openid;
     if (!peerId) return false;
@@ -170,6 +181,14 @@ export class ApprovalChannel {
     if (!data) return false;
     const button = decodeButtonData(data);
     if (!button || button.t !== 'approval') return false;
+
+    // 白名单模式下审批只认名单内用户（群成员标识或私聊 openid，可混存名单）
+    const clicker = event.group_member_openid ?? event.user_openid;
+    if (clicker && this.config.access.c2cMode === 'allowlist'
+      && !this.config.access.c2cAllow.includes(clicker)) {
+      this.logger.warn(`im-qqbot: approval button rejected (clicker not allowlisted): user=${clicker} key=${record.sessionKey}`);
+      return false;
+    }
 
     this.pending.delete(record.sessionKey);
     this.removeAbort(entry);
