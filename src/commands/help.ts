@@ -15,6 +15,7 @@ export function helpCommand(
   return {
     name: 'bot-help',
     category: 'qqbot',
+    scope: 'all',
     description: '查看所有指令',
     handler: async (cmdCtx) => {
       const agentCmds: CategorizedCommand[] = [];
@@ -28,7 +29,8 @@ export function helpCommand(
         const out: string[] = [];
         for (const cmd of cmds) {
           const name = Array.isArray(cmd.name) ? cmd.name[0] : cmd.name;
-          out.push(`<qqbot-cmd-input text="/${name}" show="/${name}"/> ${cmd.description ?? ''}`);
+          const scopeTag = cmd.scope === 'c2c' ? ' 💬私聊' : cmd.scope === 'group' ? ' 👥群聊' : '';
+          out.push(`<qqbot-cmd-input text="/${name}" show="/${name}"/>${scopeTag} ${cmd.description ?? ''}`);
         }
         return out;
       };

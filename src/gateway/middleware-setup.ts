@@ -87,7 +87,7 @@ export function setupMiddlewares(
     // 关闭 autoHelp：help 命令由 qqbot 注册为 /bot-help，
     // 避免 SDK 再自动注册一个无前缀的 /help 造成重复
     autoHelp: false,
-    commands: buildCommandList({ manager, config }),
+    commands: buildCommandList({ manager, config, logger }),
   });
   bot.use(slash.middleware);
 

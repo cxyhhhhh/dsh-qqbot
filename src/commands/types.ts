@@ -6,10 +6,12 @@
 import type { SlashCommand } from '@tencent-connect/qqbot-nodejs';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
+import type { Logger } from '../types.ts';
 
 export interface CommandDeps {
   manager: SessionManager;
   config: ImQQBotConfig;
+  logger?: Logger;
 }
 
 /** 命令分类：agent = 底层 agent 通用能力，qqbot = 插件特有 */

@@ -12,6 +12,7 @@ export function pingCommand(): CategorizedCommand {
   return {
     name: 'bot-ping',
     category: 'qqbot',
+    scope: 'all',
     description: '测试当前 dsh 与 QQ 连接的网络延迟',
     usage: [
       '/bot-ping',
@@ -44,6 +45,7 @@ export function versionCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'bot-version',
     category: 'qqbot',
+    scope: 'all',
     description: '查看版本信息',
     handler: () => {
       const current = manager.getEffectiveModel('c2c', '');
@@ -58,6 +60,7 @@ export function stopCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'stop',
     category: 'agent',
+    scope: 'all',
     description: '中止当前生成',
     hidden: true,
     handler: (cmdCtx) => {

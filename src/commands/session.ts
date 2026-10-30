@@ -14,6 +14,7 @@ export function newCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: ['new', 'reset', 'clear'],
     category: 'agent',
+    scope: 'all',
     description: '开始新会话（清空上下文）',
     handler: (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
@@ -28,6 +29,7 @@ export function compactCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'compact',
     category: 'agent',
+    scope: 'all',
     description: '压缩会话历史（摘要替换旧记录，保留上下文）',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
