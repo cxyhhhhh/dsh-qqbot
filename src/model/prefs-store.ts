@@ -6,7 +6,7 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
-import { homedir } from 'node:os';
+import { PLUGIN_HOME } from '../shared/dirs.ts';
 import type { ModelRoute } from './types.ts';
 
 /** 日志回调（可选） */
@@ -33,7 +33,7 @@ export class PrefsStore {
   private readonly debugLog?: DebugFn;
 
   constructor(debugLog?: DebugFn) {
-    this.prefsPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');
+    this.prefsPath = resolve(PLUGIN_HOME, 'model-prefs.json');
     this.debugLog = debugLog;
     this.load();
   }

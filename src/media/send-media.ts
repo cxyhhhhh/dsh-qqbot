@@ -6,10 +6,13 @@
  */
 import { stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { basename, extname, isAbsolute, relative } from 'node:path';
+import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { ReplyTarget } from '../types.ts';
 import type { SendFileConfig } from '../config.ts';
 import { MEDIA_ROOT } from './media-cleaner.ts';
+import { resolveAgentCwd } from '../shared/dirs.ts';
+
+export { resolveAgentCwd };
 
 /** 发送器最小接口（QQBot 实例满足） */
 export interface MediaSendResult {
@@ -28,17 +31,44 @@ const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
 const VOICE_EXTS = new Set(['.mp3', '.wav', '.ogg', '.aac', '.silk', '.amr']);
 
-/** 判断 filePath 是否位于 root 目录内（含 root 本身）；双侧 realpath 解析符号链接（#94-4） */
+/**
+ * 解析路径的真实形态：存在的部分全部 realpath（防目录级符号链接逃逸），
+ * 不存在的尾部段保持词法拼接（macOS 的 /var → /private/var 等系统级
+ * symlink 前缀因此被正确展开，不会与 root 的真实前缀错位）。
+ */
+function realishPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    const abs = resolve(p);
+    const segments = abs.split('/').filter(Boolean);
+    for (let i = segments.length; i > 0; i -= 1) {
+      const prefix = `/${segments.slice(0, i).join('/')}`;
+      try {
+        return join(realpathSync(prefix), ...segments.slice(i));
+      } catch {
+        continue;
+      }
+    }
+    return abs;
+  }
+}
+
+/**
+ * 判断 filePath 是否位于 root 目录内（含 root 本身）。
+ *
+ * root 侧 realpath 解析符号链接；file 不存在时按最近存在祖先解析
+ * （存在性由调用方 existsSync/stat 兜底，不应把「文件不存在」误报成
+ * 「路径不允许」）；root 不存在则该 root 无效。
+ */
 export function isWithinRoot(filePath: string, root: string): boolean {
-  let realFile: string;
   let realRoot: string;
   try {
-    realFile = realpathSync(filePath);
     realRoot = realpathSync(root);
   } catch {
-    return false; // 路径不可解析（不存在/坏链接）→ fail-closed
+    return false; // root 不可解析（不存在/坏链接）→ 该 root 无效
   }
-  const rel = relative(realRoot, realFile);
+  const rel = relative(realRoot, realishPath(filePath));
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 

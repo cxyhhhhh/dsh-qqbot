@@ -9,7 +9,7 @@ import { basename, isAbsolute, resolve } from 'node:path';
 import type { ImQQBotConfig } from '../config.ts';
 import type { SessionRecord } from '../session/index.ts';
 import type { Logger } from '../types.ts';
-import { isPathAllowed, sendMediaFile, type MediaSenderLike } from '../media/send-media.ts';
+import { isPathAllowed, resolveAgentCwd, sendMediaFile, type MediaSenderLike } from '../media/send-media.ts';
 import type { PresentedFileRef } from './events.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import type { QQBotSender } from './outbound-buffer.ts';
@@ -40,12 +40,12 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
   /** 轮末投递一批声明文件：逐个发送，未送达的聚合为一条文字提示 */
   public async deliver(record: SessionRecord, files: PresentedFileRef[]): Promise<void> {
     const limit = Math.max(1, this.config.sendFile?.maxFiles ?? 4);
-    const cwd = this.config.cwd || process.cwd();
+    const cwd = resolveAgentCwd(this.config.cwd);
     const missed: string[] = [];
     let sent = 0;
 
     for (const [index, file] of files.entries()) {
-      // 新声明记录绝对路径；历史相对路径按插件工作目录兜底解析
+      // 新声明记录绝对路径；历史相对路径按 agent 工作目录（workspace）兜底解析
       const absPath = isAbsolute(file.path) ? file.path : resolve(cwd, file.path);
       const display = basename(absPath);
       if (index >= limit) {

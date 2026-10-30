@@ -17,8 +17,7 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
 import { mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
@@ -602,7 +601,7 @@ export class SessionManager {
   private workspaceCache: string | undefined;
   private workspaceDir(): string {
     if (this.workspaceCache) return this.workspaceCache;
-    const dir = this.config.cwd ?? resolve(homedir(), '.dsh-qqbot', 'workspace');
+    const dir = resolveAgentCwd(this.config.cwd);
     mkdirSync(dir, { recursive: true });
     this.workspaceCache = dir;
     return dir;
