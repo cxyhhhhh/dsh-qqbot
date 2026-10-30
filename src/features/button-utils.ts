@@ -28,10 +28,11 @@ export interface QuestionButtonData {
   i: number;
 }
 
-/** 审批按钮：d=决策 */
+/** 审批按钮：d=决策，n=本审批的 nonce（与 pending 匹配，防旧卡片混淆 #94-3） */
 export interface ApprovalButtonData {
   t: 'approval';
   d: 'allow' | 'deny';
+  n?: string;
 }
 
 export type ButtonData = QuestionButtonData | ApprovalButtonData;

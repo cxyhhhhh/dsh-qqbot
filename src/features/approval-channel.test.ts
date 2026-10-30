@@ -71,6 +71,19 @@ function makeRequest(opts?: {
   };
 }
 
+/** 从已发送卡片的 keyboard 提取指定决策的 button_data（含 nonce） */
+function extractButtonData(msg: SentMessage, d: 'allow' | 'deny'): string {
+  const kb = msg.opts?.keyboard as { content: { rows: Array<{ buttons: Array<{ action: { data: string } }> }> } };
+  const button = kb.content.rows[0]!.buttons.find((b) => (JSON.parse(b.action.data) as { d: string }).d === d);
+  if (!button) throw new Error(`button ${d} not found`);
+  return button.action.data;
+}
+
+/** 便捷形式：取最后一张卡片 */
+function buttonDataOf(sent: SentMessage[], d: 'allow' | 'deny'): string {
+  return extractButtonData(sent[sent.length - 1]!, d);
+}
+
 function makeEvent(data: string | undefined, peer: { user?: string; group?: string; member?: string }): InteractionEvent {
   return {
     id: 'i1',
@@ -158,7 +171,7 @@ describe('ApprovalChannel.install', () => {
     expect(sent[0]!.opts?.keyboard).toBeDefined();
 
     // 点击 allow → resolve allowed-once
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { user: 'peer-qq' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { user: 'peer-qq' }))).toBe(true);
     await expect(p).resolves.toBe('allowed-once');
   });
 
@@ -211,13 +224,67 @@ describe('ApprovalChannel.install', () => {
 
     // 群互动事件点击者字段为 group_member_openid（user_openid 不填）：
     // 非授权成员点击 → 拒绝（审批保持挂起）
-    const stranger = ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { group: 'group-1', member: 'stranger-9' }));
+    const stranger = ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { group: 'group-1', member: 'stranger-9' }));
     expect(stranger).toBe(false);
 
     // 授权成员（群成员标识在名单内）点击 → 放行
-    const owner = ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { group: 'group-1', member: 'owner-1' }));
+    const owner = ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { group: 'group-1', member: 'owner-1' }));
     expect(owner).toBe(true);
     await expect(p).resolves.toBe('allowed-once');
+  });
+
+  it('旧卡片（nonce 不匹配）点击不 settle，仅当前审批的 nonce 生效（#94-3）', async () => {
+    const sent: SentMessage[] = [];
+    const ch = new ApprovalChannel(
+      createManager({
+        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
+      }),
+      createSender(sent),
+      makeConfig('allowlist', ['owner-1']),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const first = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+    // 第一张卡片作废（cancel）
+    ch.cancelPending(sessionKey('group', 'group-1'));
+    await expect(first).resolves.toBe('cancelled');
+
+    // 第二次审批 → 新卡片（新 nonce）
+    const second = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+    expect(sent).toHaveLength(2);
+
+    // 用第一张卡片的 data（旧 nonce）点击 → 拒绝，审批保持挂起
+    const staleData = extractButtonData(sent[0]!, 'allow');
+    expect(ch.handleInteraction(makeEvent(staleData, { group: 'group-1', member: 'owner-1' }))).toBe(false);
+
+    // 新卡片 nonce 点击 → 放行
+    expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { group: 'group-1', member: 'owner-1' }))).toBe(true);
+    await expect(second).resolves.toBe('allowed-once');
+  });
+
+  it('allowlist 模式：点击者身份缺失（无 openid 字段）拒绝（fail-closed）', async () => {
+    const sent: SentMessage[] = [];
+    const ch = new ApprovalChannel(
+      createManager({
+        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
+      }),
+      createSender(sent),
+      makeConfig('allowlist', ['owner-1']),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+
+    // 事件不带任何点击者标识 → 拒绝
+    expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { group: 'group-1' }))).toBe(false);
+
+    ch.cancelPending(sessionKey('group', 'group-1'));
+    await expect(p).resolves.toBe('cancelled');
   });
 
   it('allowlist 模式：私聊卡片转发给他人点击无效', async () => {
@@ -236,7 +303,7 @@ describe('ApprovalChannel.install', () => {
     await sleep(20);
 
     // 转发场景：点击者 user_openid ≠ 名单成员 → 无效
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { user: 'forwarded-user' }))).toBe(false);
+    expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { user: 'forwarded-user' }))).toBe(false);
 
     ch.cancelPending(sessionKey('c2c', 'peer-qq'));
     await expect(p).resolves.toBe('cancelled');
@@ -279,7 +346,7 @@ describe('ApprovalChannel.handleInteraction', () => {
     // 非审批按钮 → false，不消费
     expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'x', i: 0 }), { user: 'peer-qq' }))).toBe(false);
     // 拒绝 → rejected
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'deny' }), { user: 'peer-qq' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'deny'), { user: 'peer-qq' }))).toBe(true);
     await expect(p).resolves.toBe('rejected');
   });
 });

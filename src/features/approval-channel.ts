@@ -9,6 +9,7 @@
  */
 import type { EventOptions } from '@deepseek-ai/cordis';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import { randomUUID } from 'node:crypto';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { decodeButtonData } from './button-utils.ts';
 import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.ts';
@@ -81,6 +82,8 @@ interface PendingApproval {
   record: ApprovalSessionRecordLike;
   request: ApprovalRequest;
   resolve: (outcome: ApprovalOutcome) => void;
+  /** 本审批的唯一标识，编码进按钮 data，点击时必须匹配（防旧卡片混淆） */
+  nonce: string;
   onAbort?: () => void;
 }
 
@@ -182,11 +185,17 @@ export class ApprovalChannel {
     const button = decodeButtonData(data);
     if (!button || button.t !== 'approval') return false;
 
-    // 白名单模式下审批只认名单内用户（群成员标识或私聊 openid，可混存名单）
+    // nonce 必须匹配 pending：旧卡片/其它会话的卡片点击不 settle（#94-3）
+    if (button.n !== entry.nonce) {
+      this.logger.warn(`im-qqbot: approval button nonce mismatch: key=${record.sessionKey}`);
+      return false;
+    }
+
+    // 白名单模式下审批只认名单内用户；点击者身份缺失同样拒绝（fail-closed，#94-3）
     const clicker = event.group_member_openid ?? event.user_openid;
-    if (clicker && this.config.access.c2cMode === 'allowlist'
-      && !this.config.access.c2cAllow.includes(clicker)) {
-      this.logger.warn(`im-qqbot: approval button rejected (clicker not allowlisted): user=${clicker} key=${record.sessionKey}`);
+    if (this.config.access.c2cMode === 'allowlist'
+      && (!clicker || !this.config.access.c2cAllow.includes(clicker))) {
+      this.logger.warn(`im-qqbot: approval button rejected (clicker not allowlisted): user=${clicker ?? '(missing)'} key=${record.sessionKey}`);
       return false;
     }
 
@@ -203,11 +212,12 @@ export class ApprovalChannel {
     if (request.signal?.aborted) return 'cancelled';
 
     const command = commandOf(request);
+    const nonce = randomUUID().slice(0, 8);
     try {
       await this.sender.sendMarkdown(
         record.replyTarget,
         buildApprovalText(request, command),
-        { keyboard: buildApprovalKeyboard() },
+        { keyboard: buildApprovalKeyboard(nonce) },
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -216,7 +226,7 @@ export class ApprovalChannel {
     }
 
     return new Promise<ApprovalOutcome>((resolve) => {
-      const entry: PendingApproval = { record, request, resolve };
+      const entry: PendingApproval = { record, request, resolve, nonce };
       if (request.signal) {
         const onAbort = (): void => {
           if (this.pending.get(key) !== entry) return;

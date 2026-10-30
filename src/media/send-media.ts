@@ -5,7 +5,8 @@
  * 同一套扩展名分类与路径白名单，行为不会漂移。
  */
 import { stat } from 'node:fs/promises';
-import { basename, extname, isAbsolute, relative, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, extname, isAbsolute, relative } from 'node:path';
 import type { ReplyTarget } from '../types.ts';
 import type { SendFileConfig } from '../config.ts';
 import { MEDIA_ROOT } from './media-cleaner.ts';
@@ -27,9 +28,17 @@ const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
 const VOICE_EXTS = new Set(['.mp3', '.wav', '.ogg', '.aac', '.silk', '.amr']);
 
-/** 判断 filePath 是否位于 root 目录内（含 root 本身） */
+/** 判断 filePath 是否位于 root 目录内（含 root 本身）；双侧 realpath 解析符号链接（#94-4） */
 export function isWithinRoot(filePath: string, root: string): boolean {
-  const rel = relative(resolve(root), filePath);
+  let realFile: string;
+  let realRoot: string;
+  try {
+    realFile = realpathSync(filePath);
+    realRoot = realpathSync(root);
+  } catch {
+    return false; // 路径不可解析（不存在/坏链接）→ fail-closed
+  }
+  const rel = relative(realRoot, realFile);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
